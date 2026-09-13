@@ -1,12 +1,17 @@
 """Credential storage and first-time setup with a strict secret boundary."""
 
 from collections.abc import Callable
+import platform
 from typing import Protocol
 
 from email_steward.profile import OperatorProfile, validate_profile
 
 
 _SERVICE_NAME = "email-steward"
+_OS_SECURE_BACKENDS = {
+    "Windows": {("keyring.backends.Windows", "WinVaultKeyring")},
+    "Darwin": {("keyring.backends.macOS", "Keyring")},
+}
 
 
 class CredentialStoreUnavailableError(RuntimeError):
@@ -26,15 +31,15 @@ class CredentialStoreProtocol(Protocol):
 class CredentialStore:
     """Store mailbox secrets only through the operating-system keyring."""
 
-    def __init__(self, *, backend: object | None = None) -> None:
-        self._backend = backend if backend is not None else self._load_system_keyring()
+    def __init__(self) -> None:
+        self._backend, self._keyring_error = _load_verified_system_backend()
 
     def get(self, email: str) -> str | None:
         """Return the secret for an email, if it exists in the system keyring."""
         self._validate_email(email)
         try:
             return self._backend.get_password(_SERVICE_NAME, email)
-        except Exception as error:
+        except self._keyring_error as error:
             raise _unavailable_error() from error
 
     def set(self, email: str, secret: str) -> None:
@@ -44,7 +49,7 @@ class CredentialStore:
             raise ValueError("credential secret must be non-empty")
         try:
             self._backend.set_password(_SERVICE_NAME, email, secret)
-        except Exception as error:
+        except self._keyring_error as error:
             raise _unavailable_error() from error
 
     def delete(self, email: str) -> None:
@@ -52,16 +57,8 @@ class CredentialStore:
         self._validate_email(email)
         try:
             self._backend.delete_password(_SERVICE_NAME, email)
-        except Exception as error:
+        except self._keyring_error as error:
             raise _unavailable_error() from error
-
-    @staticmethod
-    def _load_system_keyring() -> object:
-        try:
-            import keyring
-        except ImportError as error:
-            raise _unavailable_error() from error
-        return keyring
 
     @staticmethod
     def _validate_email(email: str) -> None:
@@ -84,6 +81,7 @@ def collect_profile_and_secret(
             "reply_tone": input_fn("Default reply tone: "),
         }
     )
+    store.get(profile.email)
     secret = secret_prompt("Alibaba third-party client password: ")
     if not isinstance(secret, str) or not secret.strip():
         raise ValueError("Alibaba third-party client password is required")
@@ -91,8 +89,40 @@ def collect_profile_and_secret(
     return profile
 
 
-def _unavailable_error() -> CredentialStoreUnavailableError:
+def _load_verified_system_backend() -> tuple[object, type[Exception]]:
+    try:
+        import keyring
+        from keyring.errors import KeyringError
+    except ImportError as error:
+        raise _unavailable_error() from error
+
+    try:
+        backend = keyring.get_keyring()
+    except KeyringError as error:
+        raise _unavailable_error() from error
+    _validate_system_backend(backend)
+    return backend, KeyringError
+
+
+def _validate_system_backend(backend: object, *, platform_name: str | None = None) -> None:
+    """Allow only the native Windows Credential Manager or macOS Keychain backend."""
+    current_platform = platform_name if platform_name is not None else platform.system()
+    backend_type = type(backend)
+    backend_id = (backend_type.__module__, backend_type.__name__)
+    module_name = backend_type.__module__.lower()
+    if any(token in module_name for token in ("file", "plaintext", "chainer")):
+        raise _unavailable_error(
+            "File, plaintext, and chained credential backends are not supported."
+        )
+    if backend_id not in _OS_SECURE_BACKENDS.get(current_platform, set()):
+        raise _unavailable_error(
+            "The selected credential backend is not supported on this operating system."
+        )
+
+
+def _unavailable_error(detail: str | None = None) -> CredentialStoreUnavailableError:
+    suffix = f" {detail}" if detail else ""
     return CredentialStoreUnavailableError(
         "Credential storage is unavailable. Install or enable the operating-system "
-        "credential provider, then run setup again. No password was saved."
+        f"credential provider, then run setup again. No password was saved.{suffix}"
     )

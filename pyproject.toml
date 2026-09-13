@@ -7,7 +7,9 @@ name = "email-steward"
 version = "0.1.0"
 description = "Portable local workspace foundation for Email Steward"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+  "keyring>=25,<27; platform_system == 'Windows' or platform_system == 'Darwin'",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
