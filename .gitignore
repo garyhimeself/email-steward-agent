@@ -1,0 +1,12 @@
+.worktrees/
+
+# Per-operator data and secrets must never be committed.
+.email-steward/
+.env
+.env.*
+!.env.example
+*.sqlite3
+*.log
+tmp/
+__pycache__/
+*.py[cod]
