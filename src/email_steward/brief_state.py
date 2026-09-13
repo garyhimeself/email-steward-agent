@@ -15,6 +15,14 @@ from uuid import uuid4
 _RETENTION = timedelta(days=90)
 _CARD_KEYS = {"category", "summary", "action_items", "priority"}
 _HASH = re.compile(r"^[0-9a-f]{64}$")
+_CATEGORIES = {"customer", "finance", "internal", "operations", "partnership", "sales", "supplier"}
+_PRIORITIES = {"low", "medium", "high", "urgent"}
+_SUMMARY_START = re.compile(r"^(asks|confirms|flags|needs|reports|requests|requires|seeks|shares|updates)\b", re.IGNORECASE)
+_ACTION_START = re.compile(r"^(approve|archive|escalate|follow up|no action|prepare|reply|request|review|schedule|send)\b", re.IGNORECASE)
+_RAW_MAIL_MARKER = re.compile(r"\b(?:bcc|cc|content-disposition|content-type|from|mime-version|reply-to|subject|to)\s*:", re.IGNORECASE)
+_ADDRESS_OR_URL = re.compile(r"(?:\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|https?://)", re.IGNORECASE)
+_ENCODED_PAYLOAD = re.compile(r"(?:data:[^\s]+;base64,|\b[A-Za-z0-9+/]{80,}={0,2}\b|\b[0-9a-f]{80,}\b)", re.IGNORECASE)
+_DRAFT_GREETING = re.compile(r"^(?:dear|hello|hi)\s+", re.IGNORECASE)
 
 
 @dataclass
@@ -65,8 +73,11 @@ class BriefState:
     def commit(self, success_at: datetime, cards: Iterable[Mapping[str, object]]) -> None:
         """Atomically store a completed run; invalid work leaves prior state intact."""
         success_at = _require_utc_datetime(success_at, "success_at")
+        current_time = _now_utc()
+        if success_at > current_time:
+            raise ValueError("success_at cannot be in the future")
         prepared = [_prepare_card(card, success_at) for card in cards]
-        retained = _prune(self._cards, success_at)
+        retained = _prune(self._cards, current_time)
         by_identity = {_identity_key(card["identity"]): card for card in retained}
         for card in prepared:
             by_identity[_identity_key(card["identity"])] = card
@@ -129,18 +140,41 @@ def _identity_key(identity: Mapping[str, object]) -> tuple[object, object, objec
 
 
 def _normalize_semantic_card(value: object) -> dict[str, object]:
-    if not isinstance(value, Mapping) or not value or set(value) - _CARD_KEYS:
+    if not isinstance(value, Mapping) or set(value) != _CARD_KEYS:
         raise ValueError("brief entry semantic card contains unsupported data")
-    normalized: dict[str, object] = {}
-    for key, item in value.items():
-        if key in {"category", "summary", "priority"}:
-            if not isinstance(item, str) or not item.strip() or len(item) > 500:
-                raise ValueError("brief entry semantic text is invalid")
-            normalized[key] = item.strip()
-        elif key == "action_items":
-            if not isinstance(item, list) or len(item) > 20 or any(not isinstance(action, str) or not action.strip() or len(action) > 500 for action in item):
-                raise ValueError("brief entry action items are invalid")
-            normalized[key] = [action.strip() for action in item]
+    category = value["category"]
+    priority = value["priority"]
+    if not isinstance(category, str) or category not in _CATEGORIES:
+        raise ValueError("brief entry semantic category is invalid")
+    if not isinstance(priority, str) or priority not in _PRIORITIES:
+        raise ValueError("brief entry semantic priority is invalid")
+    summary = _normalize_semantic_text(value["summary"], max_length=240, field="semantic")
+    if _SUMMARY_START.match(summary) is None:
+        raise ValueError("brief entry semantic summary must be a short classified statement")
+    action_items = value["action_items"]
+    if not isinstance(action_items, list) or not action_items or len(action_items) > 5:
+        raise ValueError("brief entry action items are invalid")
+    normalized_actions = [_normalize_semantic_text(action, max_length=160, field="action") for action in action_items]
+    if any(_ACTION_START.match(action) is None for action in normalized_actions):
+        raise ValueError("brief entry action items must be short operator actions")
+    return {
+        "category": category,
+        "summary": summary,
+        "action_items": normalized_actions,
+        "priority": priority,
+    }
+
+
+def _normalize_semantic_text(value: object, *, max_length: int, field: str) -> str:
+    if not isinstance(value, str) or not value.strip() or len(value) > max_length:
+        raise ValueError(f"brief entry {field} text is invalid")
+    if "\r" in value or "\n" in value:
+        raise ValueError(f"brief entry {field} text is invalid")
+    normalized = " ".join(value.split())
+    if _RAW_MAIL_MARKER.search(normalized) or _ADDRESS_OR_URL.search(normalized) or _ENCODED_PAYLOAD.search(normalized):
+        raise ValueError(f"brief entry {field} text is not minimal semantic data")
+    if field == "action" and _DRAFT_GREETING.match(normalized):
+        raise ValueError("brief entry action text cannot contain a draft greeting")
     return normalized
 
 

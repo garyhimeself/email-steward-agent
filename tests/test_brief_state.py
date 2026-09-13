@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -66,6 +67,37 @@ class BriefStateTests(unittest.TestCase):
         self.assertEqual(restored.watermark, first_run)
         self.assertEqual(restored.plan([self.first, self.second]), [self.second])
 
+    def test_rejects_raw_mail_body_embedded_in_semantic_summary(self):
+        state = BriefState.load(self.path)
+        run_at = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
+        raw_mail = "From: vendor@example.com\nTo: operator@example.com\nSubject: Confidential\nPlease share the attached contract."
+
+        with self.assertRaisesRegex(ValueError, "semantic"):
+            state.commit(run_at, [card_for(self.first, "a" * 64, raw_mail)])
+
+        self.assertFalse(self.path.exists())
+
+    def test_rejects_raw_draft_embedded_in_semantic_action_item(self):
+        state = BriefState.load(self.path)
+        run_at = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
+        draft_card = card_for(self.first, "a" * 64)
+        draft_card["card"]["action_items"] = ["Dear Marta, thank you for your message. I can send the quotation tomorrow."]
+
+        with self.assertRaisesRegex(ValueError, "action"):
+            state.commit(run_at, [draft_card])
+
+        self.assertFalse(self.path.exists())
+
+    def test_rejects_attachment_payload_embedded_in_semantic_summary(self):
+        state = BriefState.load(self.path)
+        run_at = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
+        encoded_attachment = "data:application/pdf;base64," + ("QUJD" * 40)
+
+        with self.assertRaisesRegex(ValueError, "semantic"):
+            state.commit(run_at, [card_for(self.first, "a" * 64, encoded_attachment)])
+
+        self.assertFalse(self.path.exists())
+
     def test_state_stores_only_identity_hash_and_minimal_semantic_card_data(self):
         state = BriefState.load(self.path)
         run_at = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
@@ -117,6 +149,25 @@ class BriefStateTests(unittest.TestCase):
 
         stored = json.loads(self.path.read_text(encoding="utf-8"))
         self.assertEqual(stored["cards"], [])
+
+    def test_commit_rejects_a_future_success_timestamp(self):
+        state = BriefState.load(self.path)
+        future = datetime.now(UTC) + timedelta(minutes=5)
+
+        with self.assertRaisesRegex(ValueError, "future"):
+            state.commit(future, [card_for(self.first, "a" * 64)])
+
+        self.assertFalse(self.path.exists())
+
+    def test_commit_prunes_against_actual_current_utc_not_a_backdated_success_timestamp(self):
+        actual_now = datetime(2026, 9, 13, 12, 0, tzinfo=UTC)
+        state = BriefState.load(self.path)
+
+        with patch("email_steward.brief_state._now_utc", return_value=actual_now):
+            state.commit(actual_now - timedelta(days=91), [card_for(self.first, "a" * 64)])
+            state.commit(actual_now - timedelta(days=1), [card_for(self.second, "b" * 64)])
+
+        self.assertEqual(state.plan([self.first, self.second]), [self.first])
 
 
 if __name__ == "__main__":
