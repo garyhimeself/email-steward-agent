@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+import base64
 from dataclasses import dataclass
 from datetime import date
 from email import policy
 from email.message import Message
 from email.parser import BytesParser
+from html.parser import HTMLParser
 import re
 from typing import Protocol, TypeAlias
 
@@ -18,7 +20,7 @@ ImapResponse: TypeAlias = tuple[object, object]
 class ReadOnlyImapClient(Protocol):
     """The deliberately small subset of an IMAP client this module needs."""
 
-    def select(self, folder: str, readonly: bool = True) -> ImapResponse: ...
+    def select(self, folder: object, readonly: bool = True) -> ImapResponse: ...
 
     def uid(self, command: str, *arguments: object) -> ImapResponse: ...
 
@@ -88,7 +90,7 @@ def search_mail(
     _validate_folder(folder)
     search_scope = _build_search_scope(criteria)
     uidvalidity = _select_and_uidvalidity(client, folder)
-    status, data = client.uid("SEARCH", None, search_scope)
+    status, data = client.uid("SEARCH", "UTF-8", search_scope.encode("utf-8"))
     _require_ok(status, "UID SEARCH")
     return [
         MailIdentity(folder=folder, uidvalidity=uidvalidity, uid=uid)
@@ -127,7 +129,7 @@ def read_mail(client: ReadOnlyImapClient, identity: MailIdentity) -> MessageReco
 
 
 def _select_and_uidvalidity(client: ReadOnlyImapClient, folder: str) -> int:
-    status, _ = client.select(folder, readonly=True)
+    status, _ = client.select(_imap_folder_argument(folder), readonly=True)
     _require_ok(status, "readonly folder selection")
     _, data = client.response("UIDVALIDITY")
     uidvalidity = _parse_single_positive_int(data)
@@ -254,6 +256,7 @@ def _extract_raw_message(data: object, *, expected_uid: int) -> bytes:
 
 def _extract_safe_content(message: Message) -> tuple[str, tuple[AttachmentRecord, ...]]:
     plain_text_parts: list[str] = []
+    html_parts: list[str] = []
     attachments: list[AttachmentRecord] = []
     for part in message.walk():
         if part.is_multipart():
@@ -272,7 +275,84 @@ def _extract_safe_content(message: Message) -> tuple[str, tuple[AttachmentRecord
         elif part.get_content_type() == "text/plain":
             content = part.get_content()
             plain_text_parts.append(content if isinstance(content, str) else str(content))
-    return "\n".join(part.strip() for part in plain_text_parts if part.strip()), tuple(attachments)
+        elif part.get_content_type() == "text/html":
+            content = part.get_content()
+            html_parts.append(_html_to_plain_text(content if isinstance(content, str) else str(content)))
+    parts = plain_text_parts or html_parts
+    return "\n".join(part.strip() for part in parts if part.strip()), tuple(attachments)
+
+
+def _imap_folder_argument(folder: str) -> str | bytes:
+    """Return RFC 3501 modified UTF-7 bytes for legacy IMAP folder arguments."""
+    if folder.isascii():
+        return folder
+    encoded: list[str] = []
+    non_ascii: list[str] = []
+
+    def flush_non_ascii() -> None:
+        if non_ascii:
+            payload = "".join(non_ascii).encode("utf-16-be")
+            encoded.append("&" + base64.b64encode(payload).decode("ascii").rstrip("=").replace("/", ",") + "-")
+            non_ascii.clear()
+
+    for character in folder:
+        if "\x20" <= character <= "\x7e" and character != "&":
+            flush_non_ascii()
+            encoded.append(character)
+        elif character == "&":
+            flush_non_ascii()
+            encoded.append("&-")
+        else:
+            non_ascii.append(character)
+    flush_non_ascii()
+    return "".join(encoded).encode("ascii")
+
+
+class _SafeHtmlText(HTMLParser):
+    """Extract readable text only; never retain markup, scripts, styles, or URLs."""
+
+    _BREAK_TAGS = frozenset({"br", "p", "div", "li", "tr", "h1", "h2", "h3", "h4", "h5", "h6"})
+    _IGNORED_TAGS = frozenset({"script", "style"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._ignored_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        tag = tag.lower()
+        if tag in self._IGNORED_TAGS:
+            self._ignored_depth += 1
+        elif not self._ignored_depth and tag in self._BREAK_TAGS:
+            self._parts.append("\n")
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        self.handle_endtag(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        tag = tag.lower()
+        if tag in self._IGNORED_TAGS and self._ignored_depth:
+            self._ignored_depth -= 1
+        elif not self._ignored_depth and tag in self._BREAK_TAGS:
+            self._parts.append("\n")
+
+    def handle_data(self, data: str) -> None:
+        if not self._ignored_depth:
+            self._parts.append(data)
+
+    def text(self) -> str:
+        return "\n".join(
+            line.strip() for line in re.sub(r"[ \t\f\v]+", " ", "".join(self._parts)).splitlines() if line.strip()
+        )
+
+
+def _html_to_plain_text(content: str) -> str:
+    parser = _SafeHtmlText()
+    parser.feed(content)
+    parser.close()
+    return parser.text()
 
 
 def _header(message: Message, name: str) -> str | None:

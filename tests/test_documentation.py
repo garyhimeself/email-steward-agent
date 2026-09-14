@@ -39,7 +39,7 @@ class DocumentationTests(unittest.TestCase):
 
     def test_project_instructions_and_each_skill_define_safe_boundaries(self):
         files = [ROOT / "AGENTS.md"] + sorted((ROOT / ".agents" / "skills").glob("*/SKILL.md"))
-        self.assertEqual(len(files), 8)
+        self.assertEqual(len(files), 9)
         for path in files:
             content = path.read_text(encoding="utf-8").lower()
             for required in ("purpose", "permitted", "failure", "approval"):
@@ -51,6 +51,13 @@ class DocumentationTests(unittest.TestCase):
         for protected_value in ("facts", "money", "dates", "commitments", "recipients", "language"):
             with self.subTest(protected_value=protected_value):
                 self.assertIn(protected_value, content)
+
+    def test_legacy_skill_name_and_bilingual_upgrade_guides_are_shipped(self):
+        legacy = ROOT / ".agents" / "skills" / "business-email-managerment" / "SKILL.md"
+        self.assertTrue(legacy.is_file())
+        self.assertIn("business-email-management", legacy.read_text(encoding="utf-8"))
+        self.assertIn("business-email-managerment", (ROOT / "UPGRADE.md").read_text(encoding="utf-8"))
+        self.assertIn("business-email-managerment", (ROOT / "UPGRADE.zh-CN.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

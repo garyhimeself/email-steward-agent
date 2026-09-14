@@ -46,6 +46,12 @@ class FakeImapClient:
         self.closed = True
 
 
+class FailingImapClient(FakeImapClient):
+    def select(self, folder, readonly=True):
+        self.calls.append(("select", folder, readonly))
+        return "NO", [b"denied"]
+
+
 class InstallerTests(unittest.TestCase):
     def test_installer_displays_target_and_waits_for_confirmation_before_creating_workspace(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -318,6 +324,49 @@ class InstallerTests(unittest.TestCase):
             )
             self.assertTrue(any("schedule" in message.lower() and "before it runs" in message.lower() for message in messages))
 
+    def test_failed_imap_check_removes_incomplete_workspace_and_credential_for_a_safe_retry(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "marketing-mail"
+            store = MemoryCredentialStore()
+            messages = []
+            answers = iter((str(workspace), "yes", "Wade", "wade@example.com", "English", "English", "warm"))
+
+            result = run_install(
+                PROJECT_ROOT,
+                input_fn=lambda prompt: next(answers),
+                secret_prompt=lambda prompt: "test-only-secret",
+                credential_store=store,
+                imap_factory=lambda profile, secret: FailingImapClient(),
+                output_fn=messages.append,
+            )
+
+            self.assertIsNone(result)
+            self.assertFalse(workspace.exists())
+            self.assertIsNone(store.get("wade@example.com"))
+            self.assertTrue(any("run the installer again" in message.lower() for message in messages))
+            self.assertFalse(any("test-only-secret" in message for message in messages))
+
+    def test_failed_imap_check_keeps_an_operator_created_empty_workspace(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "marketing-mail"
+            workspace.mkdir()
+            store = MemoryCredentialStore()
+            answers = iter((str(workspace), "yes", "Wade", "wade@example.com", "English", "English", "warm"))
+
+            result = run_install(
+                PROJECT_ROOT,
+                input_fn=lambda prompt: next(answers),
+                secret_prompt=lambda prompt: "test-only-secret",
+                credential_store=store,
+                imap_factory=lambda profile, secret: FailingImapClient(),
+                output_fn=lambda message: None,
+            )
+
+            self.assertIsNone(result)
+            self.assertTrue(workspace.is_dir())
+            self.assertEqual(list(workspace.iterdir()), [])
+            self.assertIsNone(store.get("wade@example.com"))
+
     def test_install_guides_state_python_prerequisite_and_daily_brief_is_not_scheduled(self):
         english = (PROJECT_ROOT / "INSTALL.md").read_text(encoding="utf-8")
         chinese = (PROJECT_ROOT / "INSTALL.zh-CN.md").read_text(encoding="utf-8")
@@ -328,6 +377,8 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("不包含 Python", chinese)
         self.assertIn("does not create a schedule", english)
         self.assertIn("不会创建定时任务", chinese)
+        self.assertIn("retry", english.lower())
+        self.assertIn("重新运行安装器", chinese)
 
     def test_macos_launcher_is_tracked_as_executable_on_all_platforms(self):
         root = Path(__file__).resolve().parents[1]

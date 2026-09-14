@@ -6,7 +6,7 @@
 
 ## 只读 IMAP 检查失败
 
-检查网络和邮箱地址后重新运行安装器。阿里企业邮箱默认服务器是 IMAP SSL `imap.qiye.aliyun.com:993` 和 SMTP SSL `smtp.qiye.aliyun.com:465`。连接失败不代表邮件被改动。不要改用浏览器自动化绕过限制。
+检查网络和邮箱地址后重新运行安装器。检查失败后，安装器会移除未完成工作区和已保存邮箱密码，因此重新运行安装器即可从干净状态重试。阿里企业邮箱默认服务器是 IMAP SSL `imap.qiye.aliyun.com:993` 和 SMTP SSL `smtp.qiye.aliyun.com:465`。连接失败不代表邮件被改动。不要改用浏览器自动化绕过限制。
 
 ## 选错模型
 

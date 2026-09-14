@@ -105,6 +105,7 @@ def run_install(
     if store is None:
         return None
 
+    workspace_existed_before_install = workspace.exists()
     if not _install_public_runtime(Path(root), workspace, output_fn):
         return None
 
@@ -113,10 +114,20 @@ def run_install(
     profile = collect_profile_and_secret(input_fn, secret_prompt, store)
     save_profile(profile, paths.config_file)
 
-    secret = store.get(profile.email)
-    if not isinstance(secret, str) or not secret:
-        raise RuntimeError("The local credential store did not return the saved mailbox password.")
-    _verify_readonly((imap_factory or _default_imap_factory)(profile, secret))
+    try:
+        secret = store.get(profile.email)
+        if not isinstance(secret, str) or not secret:
+            raise RuntimeError("The local credential store did not return the saved mailbox password.")
+        _verify_readonly((imap_factory or _default_imap_factory)(profile, secret))
+    except (OSError, RuntimeError, imaplib.IMAP4.error):
+        _remove_failed_installation(
+            workspace,
+            profile.email,
+            store,
+            output_fn,
+            remove_workspace=not workspace_existed_before_install,
+        )
+        return None
     output_fn("Read-only IMAP verification succeeded. No email was changed.")
 
     daily_brief_enabled = _daily_brief_enabled(input_fn("Enable daily brief now? [y/N]: "))
@@ -280,6 +291,40 @@ def _save_daily_brief_preference(path: Path, enabled: bool) -> None:
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _remove_failed_installation(
+    workspace: Path,
+    email: str,
+    store: CredentialStoreProtocol,
+    output_fn: Callable[[str], None],
+    *,
+    remove_workspace: bool,
+) -> None:
+    """Remove only the just-created workspace and credential after an IMAP check fails."""
+    try:
+        store.delete(email)
+    except RuntimeError:
+        pass
+    try:
+        if remove_workspace:
+            shutil.rmtree(workspace)
+        else:
+            _remove_installer_files_from_existing_workspace(workspace)
+    except OSError:
+        output_fn("Read-only IMAP verification failed. The incomplete workspace could not be removed; do not reuse it.")
+        output_fn("只读 IMAP 验证失败。未完成工作区无法安全删除，请勿复用该文件夹。")
+        return
+    output_fn("Read-only IMAP verification failed. The incomplete workspace and saved password were removed; check your settings, then run the installer again.")
+    output_fn("只读 IMAP 验证失败。未完成工作区和已保存密码已移除；检查设置后请重新运行安装器。")
+
+
+def _remove_installer_files_from_existing_workspace(workspace: Path) -> None:
+    """Undo only reviewed installer output while preserving an operator-created root folder."""
+    for directory_name in (*_PUBLIC_RUNTIME_DIRECTORIES, ".email-steward"):
+        shutil.rmtree(workspace / directory_name)
+    for file_name in _PUBLIC_RUNTIME_FILES:
+        (workspace / file_name).unlink()
 
 
 def _verify_readonly(client: VerificationImapClient) -> None:

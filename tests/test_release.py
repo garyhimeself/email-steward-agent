@@ -86,7 +86,10 @@ class ReleasePackageTests(unittest.TestCase):
                 "INSTALL.zh-CN.md",
                 "TROUBLESHOOTING.md",
                 "TROUBLESHOOTING.zh-CN.md",
+                "UPGRADE.md",
+                "UPGRADE.zh-CN.md",
                 "src/email_steward/credentials.py",
+                ".agents/skills/business-email-managerment/SKILL.md",
             ):
                 self.assertIn(required, verified_members)
 

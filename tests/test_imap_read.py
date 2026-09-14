@@ -42,6 +42,16 @@ YWJj\r
 """
 
 
+HTML_ONLY_MESSAGE = b"""From: partner@example.com\r
+To: wade@example.com\r
+Subject: HTML-only update\r
+MIME-Version: 1.0\r
+Content-Type: text/html; charset=utf-8\r
+\r
+<html><head><style>body { display:none }</style><script>steal()</script></head><body><p>Hello <strong>partner</strong>.</p><img src="https://tracker.example/pixel" alt="tracker"><a href="https://remote.example">Read details</a></body></html>\r
+"""
+
+
 class FakeImapClient:
     def __init__(
         self,
@@ -97,7 +107,7 @@ class ImapReadTests(unittest.TestCase):
         )
         self.assertEqual(client.calls[0], ("select", "INBOX", True))
         self.assertIn(
-            ("uid", "SEARCH", None, '(SINCE 01-Sep-2026 FROM "partner@example.com")'),
+            ("uid", "SEARCH", "UTF-8", b'(SINCE 01-Sep-2026 FROM "partner@example.com")'),
             client.calls,
         )
         self.assertNotIn(("search",), client.calls)
@@ -168,6 +178,35 @@ class ImapReadTests(unittest.TestCase):
                 self.assertNotIn("\\\\Seen", " ".join(map(str, call)))
                 if call[1] == "FETCH":
                     self.assertIn("BODY.PEEK", " ".join(map(str, call)))
+
+    def test_read_html_only_message_falls_back_to_safe_readable_plain_text(self):
+        client = FakeImapClient(raw_message=HTML_ONLY_MESSAGE)
+
+        record = read_mail(client, MailIdentity(folder="INBOX", uidvalidity=801, uid=11))
+
+        self.assertIn("Hello partner.", record.plain_text)
+        self.assertIn("Read details", record.plain_text)
+        self.assertNotIn("steal", record.plain_text)
+        self.assertNotIn("display:none", record.plain_text)
+        self.assertNotIn("tracker.example", record.plain_text)
+        self.assertNotIn("remote.example", record.plain_text)
+
+    def test_search_uses_utf8_charset_bytes_for_a_chinese_subject(self):
+        client = FakeImapClient()
+
+        search_mail(client, "INBOX", {"subject": "开发合作"})
+
+        self.assertIn(
+            ("uid", "SEARCH", "UTF-8", b'(SUBJECT "\xe5\xbc\x80\xe5\x8f\x91\xe5\x90\x88\xe4\xbd\x9c")'),
+            client.calls,
+        )
+
+    def test_select_encodes_a_chinese_folder_as_modified_utf7_bytes(self):
+        client = FakeImapClient()
+
+        search_mail(client, "收件箱", {"unseen": True})
+
+        self.assertEqual(client.calls[0], ("select", b"&ZTZO9nux-", True))
 
 
 if __name__ == "__main__":

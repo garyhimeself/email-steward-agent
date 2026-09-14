@@ -17,7 +17,7 @@ Copy and save the new password immediately: it is shown only once. This is not t
 3. When asked for a workspace location, choose a private folder you can keep. Read the displayed full path and answer yes only if it is right. No workspace is created before this confirmation.
 4. On Windows, open `installer/install_agent.bat`. On macOS, open `installer/install_agent.command`. If macOS blocks it, right-click the file, choose **Open**, and approve it once.
 5. Give your name, individual company email, preferred language, reply language, and tone. The installer asks the third-party client password only in a hidden local prompt and stores it in the operating-system credential store.
-6. Wait for the read-only IMAP check. “Succeeded” means the mailbox was reached without changing email state. If it fails, use [TROUBLESHOOTING.md](TROUBLESHOOTING.md); do not paste the password into chat.
+6. Wait for the read-only IMAP check. “Succeeded” means the mailbox was reached without changing email state. If it fails, the installer removes its incomplete workspace and saved mailbox password; correct the connection details, then retry by running the installer again. Use [TROUBLESHOOTING.md](TROUBLESHOOTING.md); do not paste the password into chat.
 7. Daily brief is off by default. Enable it only after deciding the title, dimensions, output format, time, and timezone. This choice only saves your preference: it does not create a schedule or start a daily task. Configure the format and running schedule later in the Codex project guide.
 
 ## Required first acceptance, in a new Codex project

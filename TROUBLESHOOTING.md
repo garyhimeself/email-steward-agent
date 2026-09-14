@@ -6,7 +6,7 @@ Use an Alibaba **third-party client password**, not the normal webmail password.
 
 ## Read-only IMAP check fails
 
-Check your network and email address, then run the installer again. The expected Alibaba servers are IMAP SSL `imap.qiye.aliyun.com:993` and SMTP SSL `smtp.qiye.aliyun.com:465`. A connection failure does not mean email was changed. Do not switch to browser automation as a workaround.
+Check your network and email address, then run the installer again. After a failed check, the installer removes its incomplete workspace and saved mailbox password so retrying starts cleanly. The expected Alibaba servers are IMAP SSL `imap.qiye.aliyun.com:993` and SMTP SSL `smtp.qiye.aliyun.com:465`. A connection failure does not mean email was changed. Do not switch to browser automation as a workaround.
 
 ## The wrong model was selected
 

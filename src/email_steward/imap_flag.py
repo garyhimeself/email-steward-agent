@@ -6,11 +6,11 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from .approval import ApprovalToken, consume_exact_approval, verify_exact_approval
-from .imap_read import ImapReadError, MailIdentity, UIDValidityUnavailableError
+from .imap_read import ImapReadError, MailIdentity, UIDValidityUnavailableError, _imap_folder_argument
 
 
 class FlagImapClient(Protocol):
-    def select(self, folder: str, readonly: bool = False) -> tuple[object, object]: ...
+    def select(self, folder: object, readonly: bool = False) -> tuple[object, object]: ...
 
     def response(self, code: str) -> tuple[object, object]: ...
 
@@ -28,7 +28,7 @@ def star_one(client: FlagImapClient, identity: MailIdentity, token: ApprovalToke
     if not isinstance(identity, MailIdentity):
         raise TypeError("identity must be a MailIdentity")
     verify_exact_approval(token, "star", identity, current_turn_id)
-    status, _ = client.select(identity.folder, readonly=False)
+    status, _ = client.select(_imap_folder_argument(identity.folder), readonly=False)
     _require_ok(status, "folder selection")
     _, values = client.response("UIDVALIDITY")
     if _uidvalidity(values) != identity.uidvalidity:
