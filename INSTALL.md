@@ -2,7 +2,7 @@
 
 ## Before you start
 
-You need Codex, internet access, and your personal Alibaba Enterprise Mail address. The installer supports Windows and macOS. Do not share a mailbox password in chat.
+You need Codex, internet access, your personal Alibaba Enterprise Mail address, and **Python 3.11 or later**. The installer supports Windows and macOS. It does not bundle Python or pretend to include a runtime. On Windows, check `py -3 --version`; on macOS, check `python3 --version`. If the version is below 3.11 or the command is unavailable, install Python 3.11+ first, then run the launcher again. Do not share a mailbox password in chat.
 
 In Alibaba webmail, make a **third-party client password**:
 
@@ -18,7 +18,7 @@ Copy and save the new password immediately: it is shown only once. This is not t
 4. On Windows, open `installer/install_agent.bat`. On macOS, open `installer/install_agent.command`. If macOS blocks it, right-click the file, choose **Open**, and approve it once.
 5. Give your name, individual company email, preferred language, reply language, and tone. The installer asks the third-party client password only in a hidden local prompt and stores it in the operating-system credential store.
 6. Wait for the read-only IMAP check. “Succeeded” means the mailbox was reached without changing email state. If it fails, use [TROUBLESHOOTING.md](TROUBLESHOOTING.md); do not paste the password into chat.
-7. Daily brief is off by default. Enable it only after deciding the title, dimensions, output format, time, and timezone.
+7. Daily brief is off by default. Enable it only after deciding the title, dimensions, output format, time, and timezone. This choice only saves your preference: it does not create a schedule or start a daily task. Configure the format and running schedule later in the Codex project guide.
 
 ## Required first acceptance, in a new Codex project
 

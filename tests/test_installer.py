@@ -2,6 +2,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -12,6 +13,9 @@ from installer.install_agent import (
     TERRA_ACCEPTANCE_PROMPT,
     run_install,
 )
+
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 
 class MemoryCredentialStore:
@@ -83,7 +87,7 @@ class InstallerTests(unittest.TestCase):
             factory_calls = []
 
             result = run_install(
-                Path(temporary_directory) / "package",
+                PROJECT_ROOT,
                 input_fn=lambda prompt: next(answers),
                 secret_prompt=lambda prompt: events.append(("secret", prompt)) or "test-only-secret",
                 credential_store=store,
@@ -107,11 +111,15 @@ class InstallerTests(unittest.TestCase):
                 ("output", f"Target workspace: {workspace}"),
                 ("secret", "Alibaba third-party client password: "),
                 ("output", "Read-only IMAP verification succeeded. No email was changed."),
-                ("output", "Daily brief is disabled. You can enable it later after choosing its format and schedule."),
+                ("output", "Daily brief is disabled. You can enable it later after choosing its format and schedule; installation did not create a schedule."),
             ])
             self.assertIn(("output", LUNA_ACCEPTANCE_PROMPT), events)
             self.assertIn(("output", TERRA_ACCEPTANCE_PROMPT), events)
             self.assertNotIn("test-only-secret", (workspace / ".email-steward" / "config" / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(
+                json.loads((workspace / ".email-steward" / "config" / "daily-brief.json").read_text(encoding="utf-8")),
+                {"enabled": False, "version": 1},
+            )
 
     def test_installer_returns_exact_new_project_acceptance_prompts_for_luna_then_terra(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -119,7 +127,7 @@ class InstallerTests(unittest.TestCase):
             answers = iter((str(workspace), "y", "Wade", "wade@example.com", "English", "English", "warm", "n"))
 
             result = run_install(
-                Path(temporary_directory) / "package",
+                PROJECT_ROOT,
                 input_fn=lambda prompt: next(answers),
                 secret_prompt=lambda prompt: "test-only-secret",
                 credential_store=MemoryCredentialStore(),
@@ -138,7 +146,7 @@ class InstallerTests(unittest.TestCase):
             )
 
     def test_cross_platform_launchers_resolve_python_from_their_own_directory(self):
-        root = Path(__file__).resolve().parents[1]
+        root = PROJECT_ROOT
         windows_launcher = (root / "installer" / "install_agent.bat").read_text(encoding="utf-8")
         macos_launcher = (root / "installer" / "install_agent.command").read_text(encoding="utf-8")
 
@@ -146,6 +154,126 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("C:\\", windows_launcher)
         self.assertIn('"$SCRIPT_DIR/install_agent.py"', macos_launcher)
         self.assertNotIn("/Users/", macos_launcher)
+
+    def test_launchers_explain_when_python_311_is_not_available(self):
+        windows_launcher = (PROJECT_ROOT / "installer" / "install_agent.bat").read_text(encoding="utf-8")
+        macos_launcher = (PROJECT_ROOT / "installer" / "install_agent.command").read_text(encoding="utf-8")
+
+        self.assertIn("where py", windows_launcher)
+        self.assertIn("Python 3.11", windows_launcher)
+        self.assertIn("Python 3.11", macos_launcher)
+        self.assertIn("command -v python3", macos_launcher)
+        self.assertIn("sys.version_info", macos_launcher)
+
+    def test_installer_copies_only_public_runtime_files_into_new_workspace(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            package = temporary_root / "package"
+            workspace = temporary_root / "marketing-mail"
+            (package / "src" / "email_steward").mkdir(parents=True)
+            (package / "src" / "email_steward" / "marker.py").write_text("PUBLIC = True\n", encoding="utf-8")
+            (package / "installer").mkdir()
+            (package / "installer" / "install_agent.py").write_text("# public launcher\n", encoding="utf-8")
+            (package / ".agents" / "skills" / "mail-read").mkdir(parents=True)
+            (package / ".agents" / "skills" / "mail-read" / "SKILL.md").write_text("# public skill\n", encoding="utf-8")
+            (package / "docs").mkdir()
+            (package / "docs" / "private-plan.md").write_text("do-not-copy", encoding="utf-8")
+            for filename in (
+                "AGENTS.md",
+                "pyproject.toml",
+                ".gitignore",
+                "README.md",
+                "README.zh-CN.md",
+                "INSTALL.md",
+                "INSTALL.zh-CN.md",
+                "TROUBLESHOOTING.md",
+                "TROUBLESHOOTING.zh-CN.md",
+                "SPEC.md",
+            ):
+                (package / filename).write_text("public\n", encoding="utf-8")
+            (package / ".email-steward" / "config").mkdir(parents=True)
+            (package / ".email-steward" / "config" / "config.json").write_text('{"secret":"do-not-copy"}', encoding="utf-8")
+            (package / ".env").write_text("PASSWORD=do-not-copy\n", encoding="utf-8")
+            (package / "tests" / "tmp").mkdir(parents=True)
+            (package / "tests" / "tmp" / "mail.eml").write_text("do-not-copy", encoding="utf-8")
+            (package / ".git").mkdir()
+            (package / ".git" / "HEAD").write_text("do-not-copy", encoding="utf-8")
+            answers = iter((str(workspace), "yes", "Wade", "wade@example.com", "English", "English", "warm", "n"))
+
+            run_install(
+                package,
+                input_fn=lambda prompt: next(answers),
+                secret_prompt=lambda prompt: "test-only-secret",
+                credential_store=MemoryCredentialStore(),
+                imap_factory=lambda profile, secret: FakeImapClient(),
+                output_fn=lambda message: None,
+            )
+
+            self.assertTrue((workspace / "src" / "email_steward" / "marker.py").is_file())
+            self.assertTrue((workspace / "installer" / "install_agent.py").is_file())
+            self.assertTrue((workspace / ".agents" / "skills" / "mail-read" / "SKILL.md").is_file())
+            self.assertFalse((workspace / "docs").exists())
+            self.assertTrue((workspace / "AGENTS.md").is_file())
+            self.assertTrue((workspace / "pyproject.toml").is_file())
+            self.assertFalse((workspace / ".env").exists())
+            self.assertFalse((workspace / "tests").exists())
+            self.assertFalse((workspace / ".git").exists())
+            self.assertNotIn("do-not-copy", (workspace / ".email-steward" / "config" / "config.json").read_text(encoding="utf-8"))
+
+    def test_installer_refuses_to_overwrite_a_nonempty_workspace(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "marketing-mail"
+            workspace.mkdir()
+            protected = workspace / "keep-me.txt"
+            protected.write_text("operator file", encoding="utf-8")
+            events = []
+            answers = iter((str(workspace), "yes"))
+
+            result = run_install(
+                PROJECT_ROOT,
+                input_fn=lambda prompt: next(answers),
+                secret_prompt=lambda prompt: self.fail("secret prompt must not run"),
+                credential_store=MemoryCredentialStore(),
+                imap_factory=lambda profile, secret: self.fail("IMAP must not run"),
+                output_fn=events.append,
+            )
+
+            self.assertIsNone(result)
+            self.assertEqual(protected.read_text(encoding="utf-8"), "operator file")
+            self.assertTrue(any("not empty" in message.lower() for message in events))
+
+    def test_installer_persists_an_enabled_daily_brief_choice_without_claiming_a_schedule_exists(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "marketing-mail"
+            messages = []
+            answers = iter((str(workspace), "yes", "Wade", "wade@example.com", "English", "English", "warm", "yes"))
+
+            result = run_install(
+                PROJECT_ROOT,
+                input_fn=lambda prompt: next(answers),
+                secret_prompt=lambda prompt: "test-only-secret",
+                credential_store=MemoryCredentialStore(),
+                imap_factory=lambda profile, secret: FakeImapClient(),
+                output_fn=messages.append,
+            )
+
+            self.assertTrue(result.daily_brief_enabled)
+            self.assertEqual(
+                json.loads((workspace / ".email-steward" / "config" / "daily-brief.json").read_text(encoding="utf-8")),
+                {"enabled": True, "version": 1},
+            )
+            self.assertTrue(any("schedule" in message.lower() and "before it runs" in message.lower() for message in messages))
+
+    def test_install_guides_state_python_prerequisite_and_daily_brief_is_not_scheduled(self):
+        english = (PROJECT_ROOT / "INSTALL.md").read_text(encoding="utf-8")
+        chinese = (PROJECT_ROOT / "INSTALL.zh-CN.md").read_text(encoding="utf-8")
+
+        self.assertIn("Python 3.11", english)
+        self.assertIn("not bundle Python", english)
+        self.assertIn("Python 3.11", chinese)
+        self.assertIn("不包含 Python", chinese)
+        self.assertIn("does not create a schedule", english)
+        self.assertIn("不会创建定时任务", chinese)
 
     def test_macos_launcher_is_tracked_as_executable_on_all_platforms(self):
         root = Path(__file__).resolve().parents[1]
