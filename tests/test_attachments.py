@@ -4,7 +4,8 @@ import unittest
 from io import BytesIO
 from email.message import EmailMessage
 from pathlib import Path
-from zipfile import ZIP_DEFLATED, ZipFile
+from unittest.mock import patch
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -30,8 +31,13 @@ class SafeAttachmentTests(unittest.TestCase):
     def _ooxml_payload(self, application_directory):
         payload = BytesIO()
         with ZipFile(payload, "w", compression=ZIP_DEFLATED) as archive:
-            archive.writestr("[Content_Types].xml", "<Types />")
-            archive.writestr(f"{application_directory}/document.xml", "<document />")
+            for filename, content in (
+                ("[Content_Types].xml", b"<Types />"),
+                (f"{application_directory}/document.xml", b"<document />"),
+            ):
+                info = ZipInfo(filename, date_time=(2020, 1, 1, 0, 0, 0))
+                info.compress_type = ZIP_DEFLATED
+                archive.writestr(info, content)
         return payload.getvalue()
 
     def test_allowlist_materializes_only_safe_business_file_types(self):
@@ -173,6 +179,36 @@ class SafeAttachmentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "total attachment"):
             safe_attachment_paths(message, temp_dir)
 
+        self.assertEqual(list(temp_dir.iterdir()), [])
+
+    def test_rejects_total_limit_before_decoding_or_writing_any_candidate(self):
+        message = self._message_with_attachments(
+            [
+                ("first.txt", "text/plain", b"a" * 20),
+                ("second.txt", "text/plain", b"b" * 20),
+                ("third.txt", "text/plain", b"c" * 20),
+            ]
+        )
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+        decoded_candidates = []
+        original_get_payload = EmailMessage.get_payload
+
+        def track_decode(part, *args, **kwargs):
+            if kwargs.get("decode") and part.get_filename() is not None:
+                decoded_candidates.append(part.get_filename())
+            return original_get_payload(part, *args, **kwargs)
+
+        with patch("email_steward.attachments.MAX_ATTACHMENT_BYTES", 25), patch(
+            "email_steward.attachments.MAX_TOTAL_ATTACHMENT_BYTES", 50
+        ), patch.object(EmailMessage, "get_payload", autospec=True, side_effect=track_decode), patch(
+            "email_steward.attachments._write_unique"
+        ) as write_file:
+            with self.assertRaisesRegex(ValueError, "total attachment"):
+                safe_attachment_paths(message, temp_dir)
+
+        self.assertEqual(decoded_candidates, [])
+        write_file.assert_not_called()
         self.assertEqual(list(temp_dir.iterdir()), [])
 
     def test_rejects_ooxml_with_excessive_declared_uncompressed_content(self):

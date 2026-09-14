@@ -56,18 +56,9 @@ def safe_attachment_paths(message: Message, temp_dir: Path) -> list[Path]:
     paths: list[Path] = []
     total_bytes = 0
     try:
-        for part in message.walk():
-            if part.is_multipart():
-                continue
-            filename = part.get_filename()
-            if filename is None:
-                continue
-            normalized_name, extension = _normalize_filename(filename)
-            declared_type = _declared_content_type(part)
-            if declared_type not in _ALLOWED_TYPES_BY_EXTENSION.get(extension, set()):
-                continue
-            if not _encoded_payload_is_within_limit(part):
-                raise ValueError("single attachment exceeds the safe size limit")
+        candidates = list(_allowed_attachment_parts(message))
+        _preflight_attachment_sizes(candidates)
+        for part, normalized_name, extension in candidates:
             payload = part.get_payload(decode=True)
             if not isinstance(payload, bytes):
                 continue
@@ -84,6 +75,32 @@ def safe_attachment_paths(message: Message, temp_dir: Path) -> list[Path]:
             path.unlink(missing_ok=True)
         raise
     return paths
+
+
+def _allowed_attachment_parts(message: Message):
+    """Yield allowlisted candidates without decoding their transfer bodies."""
+    for part in message.walk():
+        if part.is_multipart():
+            continue
+        filename = part.get_filename()
+        if filename is None:
+            continue
+        normalized_name, extension = _normalize_filename(filename)
+        declared_type = _declared_content_type(part)
+        if declared_type in _ALLOWED_TYPES_BY_EXTENSION.get(extension, set()):
+            yield part, normalized_name, extension
+
+
+def _preflight_attachment_sizes(candidates) -> None:
+    """Reject unsafe messages before decoding or writing any candidate body."""
+    total_upper_bound = 0
+    for part, _, _ in candidates:
+        upper_bound = _decoded_payload_upper_bound(part)
+        if upper_bound is None or upper_bound > MAX_ATTACHMENT_BYTES:
+            raise ValueError("single attachment exceeds the safe size limit")
+        total_upper_bound += upper_bound
+        if total_upper_bound > MAX_TOTAL_ATTACHMENT_BYTES:
+            raise ValueError("total attachment size exceeds the safe limit")
 
 
 def cleanup_temp_files(temp_dir: Path) -> None:
@@ -146,23 +163,18 @@ def _payload_matches_signature(extension: str, payload: bytes) -> bool:
     return False
 
 
-def _encoded_payload_is_within_limit(part: Message) -> bool:
-    """Reject transfer bodies that would be unsafe to decode in memory."""
+def _decoded_payload_upper_bound(part: Message) -> int | None:
+    """Return a conservative decoded-byte upper bound without decoding a body."""
     encoded = part.get_payload(decode=False)
     if not isinstance(encoded, (str, bytes)):
-        return False
-    encoded_length = len(encoded.encode("utf-8")) if isinstance(encoded, str) else len(encoded)
+        return None
+    encoded_bytes = encoded.encode("utf-8") if isinstance(encoded, str) else encoded
+    encoded_length = len(encoded_bytes)
     transfer_encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
     if transfer_encoding == "base64":
-        base64_bytes = ((MAX_ATTACHMENT_BYTES + 2) // 3) * 4
-        # RFC 2045 commonly folds base64 at 76 characters; reserve line endings
-        # plus a small header/parser tolerance, while still bounding decode input.
-        allowed = base64_bytes + ((base64_bytes + 75) // 76) * 2 + 8192
-    elif transfer_encoding == "quoted-printable":
-        allowed = MAX_ATTACHMENT_BYTES * 3 + 8192
-    else:
-        allowed = MAX_ATTACHMENT_BYTES + 8192
-    return encoded_length <= allowed
+        base64_length = len(encoded_bytes.translate(None, b" \t\r\n"))
+        return ((base64_length + 3) // 4) * 3
+    return encoded_length
 
 
 def _is_ooxml(payload: bytes, required_directory: str) -> bool:
