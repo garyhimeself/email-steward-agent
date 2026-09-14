@@ -113,6 +113,41 @@ class DraftingTests(unittest.TestCase):
                     source_identity="wade@example.com", message_id=None, references=None,
                 )
 
+    def test_draft_rejects_non_bare_or_structurally_invalid_addresses(self):
+        invalid_addresses = (
+            "Partner <partner@example.com>",
+            "<partner@example.com>",
+            '"partner"@example.com',
+            "partner @example.com",
+            "partner\t@example.com",
+            "partner..team@example.com",
+            ".partner@example.com",
+            "partner.@example.com",
+            "partner@example..com",
+            "partner@-example.com",
+            "partner@example-.com",
+            "partner@exam_ple.com",
+            "partner@example.com.",
+            "partner@example.com\nBcc: injected@example.com",
+            "partner@example.com\x00",
+        )
+        for value in invalid_addresses:
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "email address"):
+                Draft(
+                    recipient=(value,), cc=(), bcc=(), subject="Update", body="Hello",
+                    source_identity="wade@example.com", message_id=None, references=None,
+                )
+
+    def test_draft_preserves_allowed_ascii_local_part_exactly(self):
+        draft = Draft(
+            recipient=("A!#$%&'*+-/=?^_`{|}~Z@example.COM",),
+            cc=(), bcc=(), subject="Update", body="Hello",
+            source_identity="Sales+EU@example.COM", message_id=None, references=None,
+        )
+
+        self.assertEqual(draft.recipient, ("A!#$%&'*+-/=?^_`{|}~Z@example.com",))
+        self.assertEqual(draft.source_identity, "Sales+EU@example.com")
+
 
 if __name__ == "__main__":
     unittest.main()

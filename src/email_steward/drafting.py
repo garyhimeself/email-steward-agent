@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from email.utils import getaddresses
-import re
 
 from .imap_read import MessageRecord
 
@@ -13,7 +12,7 @@ class ReplyDraftError(ValueError):
     """A reply cannot be safely tied to its source email."""
 
 
-_EMAIL = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
+_LOCAL_ALLOWED = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'*+-/=?^_`{|}~.")
 
 
 @dataclass(frozen=True)
@@ -137,10 +136,35 @@ def _addresses(header: str | None) -> tuple[str, ...]:
 def _normalize_address(value: object, field: str) -> str:
     if not isinstance(value, str) or _unsafe_text(value):
         raise ValueError(f"{field} must be a safe email address")
-    if value != value.strip() or not value.isascii() or not _EMAIL.fullmatch(value):
+    if value != value.strip() or not value.isascii() or value.count("@") != 1:
         raise ValueError(f"{field} must be a valid single email address")
     local_part, domain = value.rsplit("@", 1)
+    if (
+        not local_part
+        or len(local_part) > 64
+        or local_part.startswith(".")
+        or local_part.endswith(".")
+        or ".." in local_part
+        or any(character not in _LOCAL_ALLOWED for character in local_part)
+    ):
+        raise ValueError(f"{field} must be a valid single email address")
+
+    labels = domain.split(".")
+    if len(domain) > 253 or len(labels) < 2 or any(not _valid_domain_label(label) for label in labels):
+        raise ValueError(f"{field} must be a valid single email address")
+
+    # ASCII-only lowercasing is deterministic and cannot change the local part.
     return f"{local_part}@{domain.lower()}"
+
+
+def _valid_domain_label(label: str) -> bool:
+    return (
+        bool(label)
+        and len(label) <= 63
+        and not label.startswith("-")
+        and not label.endswith("-")
+        and all(character.isascii() and (character.isalnum() or character == "-") for character in label)
+    )
 
 
 def _unsafe_text(value: str) -> bool:

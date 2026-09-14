@@ -52,7 +52,7 @@ class ApprovalTests(unittest.TestCase):
 
     def test_confirmation_must_match_the_uppercase_action_exactly(self):
         original = draft()
-        for confirmation in (" send", "SEND ", "send", "SEND\\n", "SEND\\r", "SEND\\x00"):
+        for confirmation in (" send", "SEND ", "send", "SEND\n", "SEND\r", "SEND\x00"):
             with self.assertRaisesRegex(ApprovalError, "confirmation"):
                 ApprovalToken.for_action("send", original, "turn-1", confirmation=confirmation)
         ApprovalToken.for_action("send", original, "turn-1", confirmation="SEND")
