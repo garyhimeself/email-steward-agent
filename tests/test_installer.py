@@ -1,3 +1,4 @@
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -145,6 +146,17 @@ class InstallerTests(unittest.TestCase):
         self.assertNotIn("C:\\", windows_launcher)
         self.assertIn('"$SCRIPT_DIR/install_agent.py"', macos_launcher)
         self.assertNotIn("/Users/", macos_launcher)
+
+    def test_macos_launcher_is_tracked_as_executable_on_all_platforms(self):
+        root = Path(__file__).resolve().parents[1]
+        result = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "--stage", "--", "installer/install_agent.command"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertRegex(result.stdout, r"^100755 [0-9a-f]+ 0\tinstaller/install_agent\.command\s*$")
 
 
 if __name__ == "__main__":
