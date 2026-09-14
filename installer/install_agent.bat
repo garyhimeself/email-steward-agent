@@ -14,4 +14,4 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-py -3 "%~dp0install_agent.py"
+py -3 "%~dp0install_agent.py" %*

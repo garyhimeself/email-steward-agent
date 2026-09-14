@@ -3,7 +3,13 @@ import sys
 import tempfile
 import unittest
 import json
+import io
+import imaplib
+import socket
+import ssl
+from contextlib import redirect_stderr
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -11,6 +17,8 @@ from installer.install_agent import (
     ALIBABA_THIRD_PARTY_PASSWORD_PATH,
     LUNA_ACCEPTANCE_PROMPT,
     TERRA_ACCEPTANCE_PROMPT,
+    IMAP_CONNECT_TIMEOUT_SECONDS,
+    parse_profile_prefill,
     run_install,
 )
 from email_steward.credentials import CredentialStoreUnavailableError
@@ -42,6 +50,10 @@ class FakeImapClient:
         self.calls.append(("select", folder, readonly))
         return "OK", [b"0"]
 
+    def login(self, email, secret):
+        self.calls.append(("login", email, secret))
+        return "OK", [b"logged in"]
+
     def logout(self):
         self.closed = True
 
@@ -52,7 +64,220 @@ class FailingImapClient(FakeImapClient):
         return "NO", [b"denied"]
 
 
+class ImapPostAuthenticationFailure(FakeImapClient):
+    def select(self, folder, readonly=True):
+        self.calls.append(("select", folder, readonly))
+        raise imaplib.IMAP4.error("[SERVERBUG] internal diagnostic must stay private")
+
+
+class FailingSecondCredentialReadStore(MemoryCredentialStore):
+    def __init__(self):
+        super().__init__()
+        self.get_calls = 0
+
+    def get(self, email):
+        self.get_calls += 1
+        if self.get_calls == 2:
+            raise RuntimeError("credential diagnostic must stay private")
+        return super().get(email)
+
+
 class InstallerTests(unittest.TestCase):
+    def test_chat_prefilled_profile_skips_all_nonsecret_terminal_questions(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "marketing-mail"
+            requested_prompts = []
+            secret_prompts = []
+            profile_prefill = {
+                "name": "Wade Su",
+                "email": "wade@example.com",
+                "preferred_language": "English",
+                "reply_language": "English",
+                "reply_tone": "warm and concise",
+            }
+            answers = iter((str(workspace), "yes", "n"))
+
+            result = run_install(
+                PROJECT_ROOT,
+                input_fn=lambda prompt: requested_prompts.append(prompt) or next(answers),
+                secret_prompt=lambda prompt: secret_prompts.append(prompt) or "test-only-secret",
+                credential_store=MemoryCredentialStore(),
+                imap_factory=lambda profile, secret: FakeImapClient(),
+                output_fn=lambda message: None,
+                profile_prefill=profile_prefill,
+            )
+
+            self.assertIsNotNone(result)
+            self.assertEqual(
+                requested_prompts,
+                [
+                    "Where should the Email Steward workspace be created? ",
+                    "Create this workspace? [y/N]: ",
+                    "Enable daily brief now? [y/N]: ",
+                ],
+            )
+            self.assertEqual(secret_prompts, ["Alibaba third-party client password: "])
+            self.assertEqual(result.profile.email, "wade@example.com")
+
+    def test_missing_prefill_field_falls_back_only_for_that_nonsecret_field(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "marketing-mail"
+            requested_prompts = []
+            prefill = {
+                "name": "Wade Su",
+                "email": "wade@example.com",
+                "preferred_language": "English",
+                "reply_language": "English",
+            }
+            answers = iter((str(workspace), "yes", "warm", "n"))
+
+            result = run_install(
+                PROJECT_ROOT,
+                input_fn=lambda prompt: requested_prompts.append(prompt) or next(answers),
+                secret_prompt=lambda prompt: "test-only-secret",
+                credential_store=MemoryCredentialStore(),
+                imap_factory=lambda profile, secret: FakeImapClient(),
+                output_fn=lambda message: None,
+                profile_prefill=prefill,
+            )
+
+            self.assertIsNotNone(result)
+            self.assertEqual(requested_prompts[-2:], ["Default reply tone: ", "Enable daily brief now? [y/N]: "])
+            self.assertNotIn("Your name: ", requested_prompts)
+            self.assertNotIn("Your Alibaba Enterprise Mail address: ", requested_prompts)
+
+    def test_cli_accepts_only_explicit_nonsecret_profile_prefill_flags(self):
+        prefill = parse_profile_prefill(
+            [
+                "--name", "Wade Su",
+                "--email", "wade@example.com",
+                "--preferred-language", "English",
+                "--reply-language", "English",
+                "--reply-tone", "warm",
+            ]
+        )
+
+        self.assertEqual(prefill["email"], "wade@example.com")
+        stderr = io.StringIO()
+        with redirect_stderr(stderr), self.assertRaises(SystemExit):
+            parse_profile_prefill(["--password", "test-only-secret"])
+        self.assertNotIn("test-only-secret", stderr.getvalue())
+
+    def test_secure_credential_read_failure_is_not_misreported_as_an_imap_login_failure(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "marketing-mail"
+            messages = []
+            answers = iter((str(workspace), "yes"))
+            result = run_install(
+                PROJECT_ROOT,
+                input_fn=lambda prompt: next(answers),
+                secret_prompt=lambda prompt: "test-only-secret",
+                credential_store=FailingSecondCredentialReadStore(),
+                imap_factory=lambda profile, secret: self.fail("IMAP must not run"),
+                output_fn=messages.append,
+                profile_prefill={
+                    "name": "Wade Su", "email": "wade@example.com",
+                    "preferred_language": "English", "reply_language": "English", "reply_tone": "warm",
+                },
+            )
+
+            output = "\n".join(messages).lower()
+            self.assertIsNone(result)
+            self.assertIn("secure credential store", output)
+            self.assertNotIn("after login", output)
+            self.assertNotIn("test-only-secret", output)
+
+    def test_imap_authentication_rejection_is_not_claimed_as_a_wrong_password_or_leaked(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "marketing-mail"
+            messages = []
+            answers = iter((str(workspace), "yes", "n"))
+            secret = "test-only-secret"
+
+            result = run_install(
+                PROJECT_ROOT,
+                input_fn=lambda prompt: next(answers),
+                secret_prompt=lambda prompt: secret,
+                credential_store=MemoryCredentialStore(),
+                imap_factory=lambda profile, value: (_ for _ in ()).throw(
+                    imaplib.IMAP4.error(f"[AUTHENTICATIONFAILED] {secret}")
+                ),
+                output_fn=messages.append,
+                profile_prefill={
+                    "name": "Wade Su", "email": "wade@example.com",
+                    "preferred_language": "English", "reply_language": "English", "reply_tone": "warm",
+                },
+            )
+
+            output = "\n".join(messages).lower()
+            self.assertIsNone(result)
+            self.assertIn("rejected the login", output)
+            self.assertIn("does not prove", output)
+            self.assertNotIn("wrong password", output)
+            self.assertNotIn(secret, output)
+            self.assertNotIn("authenticationfailed", output)
+
+    def test_imap_connection_timeout_and_tls_failures_have_safe_distinct_diagnostics(self):
+        failures = (
+            (TimeoutError("test-only-secret"), "timed out"),
+            (ssl.SSLError("test-only-secret"), "secure connection"),
+            (socket.gaierror("test-only-secret"), "network connection"),
+        )
+        for failure, expected_phrase in failures:
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as temporary_directory:
+                workspace = Path(temporary_directory) / "marketing-mail"
+                messages = []
+                answers = iter((str(workspace), "yes", "n"))
+                result = run_install(
+                    PROJECT_ROOT,
+                    input_fn=lambda prompt: next(answers),
+                    secret_prompt=lambda prompt: "test-only-secret",
+                    credential_store=MemoryCredentialStore(),
+                    imap_factory=lambda profile, secret, error=failure: (_ for _ in ()).throw(error),
+                    output_fn=messages.append,
+                    profile_prefill={
+                        "name": "Wade Su", "email": "wade@example.com",
+                        "preferred_language": "English", "reply_language": "English", "reply_tone": "warm",
+                    },
+                )
+                output = "\n".join(messages).lower()
+                self.assertIsNone(result)
+                self.assertIn(expected_phrase, output)
+                self.assertNotIn("test-only-secret", output)
+
+    def test_imap_failure_after_login_is_not_reported_as_an_authentication_rejection(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "marketing-mail"
+            messages = []
+            answers = iter((str(workspace), "yes", "n"))
+            result = run_install(
+                PROJECT_ROOT,
+                input_fn=lambda prompt: next(answers),
+                secret_prompt=lambda prompt: "test-only-secret",
+                credential_store=MemoryCredentialStore(),
+                imap_factory=lambda profile, secret: ImapPostAuthenticationFailure(),
+                output_fn=messages.append,
+                profile_prefill={
+                    "name": "Wade Su", "email": "wade@example.com",
+                    "preferred_language": "English", "reply_language": "English", "reply_tone": "warm",
+                },
+            )
+
+            output = "\n".join(messages).lower()
+            self.assertIsNone(result)
+            self.assertIn("after login", output)
+            self.assertNotIn("rejected the login", output)
+            self.assertNotIn("serverbug", output)
+
+    def test_default_imap_connection_uses_a_bounded_timeout(self):
+        from installer import install_agent
+        profile = type("Profile", (), {"imap_host": "imap.example.com", "imap_port": 993, "email": "wade@example.com"})()
+        client = FakeImapClient()
+        with patch.object(install_agent.imaplib, "IMAP4_SSL", return_value=client) as imap_ssl:
+            install_agent._default_imap_factory(profile, "test-only-secret")
+
+        imap_ssl.assert_called_once_with("imap.example.com", 993, timeout=IMAP_CONNECT_TIMEOUT_SECONDS)
+
     def test_installer_displays_target_and_waits_for_confirmation_before_creating_workspace(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory) / "marketing-mail"
@@ -158,8 +383,10 @@ class InstallerTests(unittest.TestCase):
         macos_launcher = (root / "installer" / "install_agent.command").read_text(encoding="utf-8")
 
         self.assertIn("%~dp0install_agent.py", windows_launcher)
+        self.assertIn("%*", windows_launcher)
         self.assertNotIn("C:\\", windows_launcher)
         self.assertIn('"$SCRIPT_DIR/install_agent.py"', macos_launcher)
+        self.assertIn('"$@"', macos_launcher)
         self.assertNotIn("/Users/", macos_launcher)
 
     def test_launchers_explain_when_python_311_is_not_available(self):

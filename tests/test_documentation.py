@@ -18,17 +18,17 @@ class DocumentationTests(unittest.TestCase):
             ),
             "INSTALL.md": (
                 "Settings → Account & Security → Account Security → Third-party client login security management → Generate new password",
-                "shown only once", "Luna", "low reasoning", "Terra", "Bcc", "never sends automatically",
+                "shown only once", "Codex chat", "hidden local password prompt", "Luna", "low reasoning", "Terra", "Bcc", "never sends automatically",
             ),
             "INSTALL.zh-CN.md": (
                 "设置 → 账户与安全 → 账户安全 → 三方客户端登录安全管理 → 生成新密码",
-                "只显示一次", "Luna", "低推理", "Terra", "密送", "绝不自动发送",
+                "只显示一次", "Codex 对话", "本地隐藏密码窗口", "Luna", "低推理", "Terra", "密送", "绝不自动发送",
             ),
             "TROUBLESHOOTING.md": (
-                "third-party client password", "Luna", "low reasoning", "Terra", "humanizer", "Bcc", "automatic send",
+                "third-party client password", "does not prove", "administrator", "Luna", "low reasoning", "Terra", "humanizer", "Bcc", "automatic send",
             ),
             "TROUBLESHOOTING.zh-CN.md": (
-                "第三方客户端安全密码", "Luna", "低推理", "Terra", "humanizer", "密送", "自动发送",
+                "第三方客户端安全密码", "不等于", "管理员", "Luna", "低推理", "Terra", "humanizer", "密送", "自动发送",
             ),
         }
         for filename, phrases in requirements.items():

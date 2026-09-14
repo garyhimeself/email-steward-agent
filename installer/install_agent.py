@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 from collections.abc import Callable
 from dataclasses import dataclass
 import getpass
@@ -9,9 +10,11 @@ import imaplib
 import json
 from pathlib import Path
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
-from typing import Protocol
+from typing import Mapping, Protocol, Sequence
 from uuid import uuid4
 
 
@@ -53,6 +56,14 @@ _PUBLIC_RUNTIME_FILES = (
 _EXCLUDED_RUNTIME_NAMES = {".email-steward", ".git", "__pycache__", "cache", "logs", "tests", "tmp"}
 _MINIMUM_PYTHON_VERSION = (3, 11)
 _KEYRING_REQUIREMENT = "keyring>=25,<27"
+IMAP_CONNECT_TIMEOUT_SECONDS = 20.0
+_PROFILE_PREFILL_FIELDS = (
+    "name",
+    "email",
+    "preferred_language",
+    "reply_language",
+    "reply_tone",
+)
 
 
 class VerificationImapClient(Protocol):
@@ -63,6 +74,21 @@ class VerificationImapClient(Protocol):
 
 CredentialStoreFactory = Callable[[], CredentialStoreProtocol]
 DependencyRunner = Callable[[tuple[str, ...], Path], int]
+
+
+class ImapVerificationError(RuntimeError):
+    """A safe, categorized failure that deliberately discards server diagnostics."""
+
+    def __init__(self, category: str) -> None:
+        super().__init__(category)
+        self.category = category
+
+
+class _SafeArgumentParser(argparse.ArgumentParser):
+    """Do not echo rejected command-line values, which could be a pasted password."""
+
+    def error(self, message: str) -> None:
+        self.exit(2, "Invalid installer option. Only non-secret profile options are accepted.\n")
 
 
 @dataclass(frozen=True)
@@ -85,6 +111,7 @@ def run_install(
     dependency_runner: DependencyRunner | None = None,
     imap_factory: Callable[[OperatorProfile, str], VerificationImapClient] | None = None,
     output_fn: Callable[[str], None] = print,
+    profile_prefill: Mapping[str, object] | None = None,
 ) -> InstallResult | None:
     """Run the consent-first installer; no workspace is created before consent."""
     output_fn(ALIBABA_THIRD_PARTY_PASSWORD_PATH)
@@ -111,15 +138,30 @@ def run_install(
 
     paths = WorkspacePaths.from_root(workspace)
     paths.ensure_local_directories()
-    profile = collect_profile_and_secret(input_fn, secret_prompt, store)
+    profile = collect_profile_and_secret(
+        input_fn, secret_prompt, store, profile_prefill=profile_prefill
+    )
     save_profile(profile, paths.config_file)
 
     try:
         secret = store.get(profile.email)
         if not isinstance(secret, str) or not secret:
             raise RuntimeError("The local credential store did not return the saved mailbox password.")
-        _verify_readonly((imap_factory or _default_imap_factory)(profile, secret))
-    except (OSError, RuntimeError, imaplib.IMAP4.error):
+    except RuntimeError:
+        _report_credential_read_failure(output_fn)
+        _remove_failed_installation(
+            workspace,
+            profile.email,
+            store,
+            output_fn,
+            remove_workspace=not workspace_existed_before_install,
+        )
+        return None
+
+    try:
+        _create_and_verify_readonly((imap_factory or _default_imap_factory), profile, secret)
+    except ImapVerificationError as error:
+        _report_imap_verification_failure(error, output_fn)
         _remove_failed_installation(
             workspace,
             profile.email,
@@ -327,20 +369,112 @@ def _remove_installer_files_from_existing_workspace(workspace: Path) -> None:
         (workspace / file_name).unlink()
 
 
-def _verify_readonly(client: VerificationImapClient) -> None:
+def _create_and_verify_readonly(
+    imap_factory: Callable[[OperatorProfile, str], VerificationImapClient],
+    profile: OperatorProfile,
+    secret: str,
+) -> None:
+    """Separate login rejection from a failure after a successful client is created."""
     try:
-        status, _ = client.select("INBOX", readonly=True)
-        if status not in ("OK", b"OK"):
-            raise RuntimeError("Read-only IMAP verification did not succeed")
+        client = imap_factory(profile, secret)
+    except imaplib.IMAP4.error as error:
+        raise ImapVerificationError("authentication_rejected") from error
+    except (TimeoutError, socket.timeout) as error:
+        raise ImapVerificationError("timeout") from error
+    except ssl.SSLError as error:
+        raise ImapVerificationError("tls") from error
+    except OSError as error:
+        raise ImapVerificationError("connection") from error
+
+    try:
+        _verify_readonly(client)
+    except ImapVerificationError:
+        raise
+    except (TimeoutError, socket.timeout) as error:
+        raise ImapVerificationError("timeout") from error
+    except ssl.SSLError as error:
+        raise ImapVerificationError("tls") from error
+    except (OSError, RuntimeError, imaplib.IMAP4.error) as error:
+        raise ImapVerificationError("post_authentication") from error
     finally:
-        client.logout()
+        try:
+            client.logout()
+        except (OSError, RuntimeError, imaplib.IMAP4.error):
+            pass
+
+
+def _verify_readonly(client: VerificationImapClient) -> None:
+    status, _ = client.select("INBOX", readonly=True)
+    if status not in ("OK", b"OK"):
+        raise RuntimeError("Read-only IMAP verification did not succeed")
 
 
 def _default_imap_factory(profile: OperatorProfile, secret: str) -> VerificationImapClient:
-    client = imaplib.IMAP4_SSL(profile.imap_host, profile.imap_port)
+    client = imaplib.IMAP4_SSL(
+        profile.imap_host, profile.imap_port, timeout=IMAP_CONNECT_TIMEOUT_SECONDS
+    )
     client.login(profile.email, secret)
     return client
 
 
+def _report_imap_verification_failure(
+    error: ImapVerificationError, output_fn: Callable[[str], None]
+) -> None:
+    """Give operators an actionable diagnosis without logging a server response or secret."""
+    messages = {
+        "timeout": (
+            "The network connection to the mail server timed out. Check your network or VPN, then retry.",
+            "连接邮件服务器超时。请检查网络或 VPN 后重试。",
+        ),
+        "tls": (
+            "A secure connection to the mail server could not be established. Check your network, system date/time, or company security policy, then retry.",
+            "无法建立到邮件服务器的安全连接。请检查网络、系统日期时间或公司安全策略后重试。",
+        ),
+        "connection": (
+            "A network connection to the mail server could not be established. Check your network, VPN, and company firewall policy, then retry.",
+            "无法连接邮件服务器。请检查网络、VPN 和公司防火墙策略后重试。",
+        ),
+        "authentication_rejected": (
+            "The mail server rejected the login. This does not prove the third-party client password is wrong. Check third-party client login access, the mailbox address, administrator policy, and the saved third-party client password, then retry.",
+            "邮件服务器拒绝了登录。这不等于第三方客户端安全密码错误。请检查是否已允许第三方客户端登录、邮箱地址、管理员策略和已保存的第三方客户端安全密码后重试。",
+        ),
+        "post_authentication": (
+            "The read-only mailbox check failed after login. This is not a password diagnosis; check mailbox availability or ask the mail administrator, then retry.",
+            "登录后只读邮箱检查失败。这不是密码诊断；请检查邮箱可用性或咨询邮箱管理员后重试。",
+        ),
+    }
+    english, chinese = messages.get(error.category, messages["post_authentication"])
+    output_fn(english)
+    output_fn(chinese)
+
+
+def _report_credential_read_failure(output_fn: Callable[[str], None]) -> None:
+    """Explain a local credential-store failure without treating it as a mailbox diagnosis."""
+    output_fn(
+        "The secure credential store could not provide the saved password. No IMAP login was attempted; check the operating-system credential store, then retry."
+    )
+    output_fn(
+        "系统安全凭据库无法读取已保存的密码，因此没有尝试 IMAP 登录。请检查系统凭据库后重试。"
+    )
+
+
+def parse_profile_prefill(argv: Sequence[str] | None = None) -> dict[str, str]:
+    """Parse only non-secret data collected by a Codex chat before launching setup."""
+    parser = _SafeArgumentParser(add_help=True)
+    parser.add_argument("--name")
+    parser.add_argument("--email")
+    parser.add_argument("--preferred-language", dest="preferred_language")
+    parser.add_argument("--reply-language", dest="reply_language")
+    parser.add_argument("--reply-tone", dest="reply_tone")
+    parsed = parser.parse_args(argv)
+    return {
+        field: value
+        for field in _PROFILE_PREFILL_FIELDS
+        if isinstance((value := getattr(parsed, field)), str) and value.strip()
+    }
+
+
 if __name__ == "__main__":
-    run_install(Path(__file__).resolve().parents[1])
+    run_install(
+        Path(__file__).resolve().parents[1], profile_prefill=parse_profile_prefill()
+    )

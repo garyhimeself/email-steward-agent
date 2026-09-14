@@ -21,6 +21,10 @@ Tell the operator to create an Alibaba third-party client password in webmail:
 `Settings → Account & Security → Account Security → Third-party client login security management → Generate new password`.
 It is shown only once: copy and store it safely. Request it only through the local hidden prompt. Never request, repeat, log, save, commit, or paste it into chat.
 
+## First installation conversation
+
+When an operator says “help me install this Agent,” collect and confirm the workspace folder plus these non-secret values in chat: name, personal company email, preferred language, reply language, and reply tone. Start the installer with only its matching non-secret flags; do not make the operator repeat them in the terminal. The terminal must request only the third-party client password through `getpass`. Never put that password in a command, environment variable, file, or chat. If IMAP rejects login, say that the rejection does not prove the password is wrong; distinguish connection, TLS, timeout, authentication rejection, and a post-login mailbox failure without exposing raw server responses.
+
 ## Drafting and humanizer
 
 Drafts are unsent chat content, not mailbox drafts. Use the local `humanizer` skill after factual review. It may improve phrasing and remove formulaic AI wording, but must preserve facts, names, companies, product details, money, dates, deadlines, commitments, recipients, Cc, Bcc, selected language, and agreed tone. Do not invent details to make a draft sound natural.

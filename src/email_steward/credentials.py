@@ -1,6 +1,6 @@
 """Credential storage and first-time setup with a strict secret boundary."""
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 import platform
 from typing import Protocol
 
@@ -11,6 +11,20 @@ _SERVICE_NAME = "email-steward"
 _OS_SECURE_BACKENDS = {
     "Windows": {("keyring.backends.Windows", "WinVaultKeyring")},
     "Darwin": {("keyring.backends.macOS", "Keyring")},
+}
+_PROFILE_INPUT_FIELDS = (
+    "name",
+    "email",
+    "preferred_language",
+    "reply_language",
+    "reply_tone",
+)
+_PROFILE_PROMPTS = {
+    "name": "Your name: ",
+    "email": "Your Alibaba Enterprise Mail address: ",
+    "preferred_language": "Preferred language: ",
+    "reply_language": "Default reply language: ",
+    "reply_tone": "Default reply tone: ",
 }
 
 
@@ -70,23 +84,39 @@ def collect_profile_and_secret(
     input_fn: Callable[[str], str],
     secret_prompt: Callable[[str], str],
     store: CredentialStoreProtocol,
+    *,
+    profile_prefill: Mapping[str, object] | None = None,
 ) -> OperatorProfile:
-    """Collect non-secret preferences, then send only the secret to the store."""
-    profile = validate_profile(
-        {
-            "name": input_fn("Your name: "),
-            "email": input_fn("Your Alibaba Enterprise Mail address: "),
-            "preferred_language": input_fn("Preferred language: "),
-            "reply_language": input_fn("Default reply language: "),
-            "reply_tone": input_fn("Default reply tone: "),
-        }
-    )
+    """Use non-secret prefill when present, then request only missing fields and the secret."""
+    values = _collect_profile_values(input_fn, profile_prefill)
+    profile = validate_profile(values)
     store.get(profile.email)
     secret = secret_prompt("Alibaba third-party client password: ")
     if not isinstance(secret, str) or not secret.strip():
         raise ValueError("Alibaba third-party client password is required")
     store.set(profile.email, secret)
     return profile
+
+
+def _collect_profile_values(
+    input_fn: Callable[[str], str], profile_prefill: Mapping[str, object] | None
+) -> dict[str, object]:
+    """Keep secret-like fields out of the prefill boundary and prompt only for omissions."""
+    if profile_prefill is None:
+        supplied: Mapping[str, object] = {}
+    elif not isinstance(profile_prefill, Mapping):
+        raise ValueError("profile prefill must be a mapping of non-secret fields")
+    else:
+        unknown_fields = set(profile_prefill) - set(_PROFILE_INPUT_FIELDS)
+        if unknown_fields:
+            raise ValueError("profile prefill may contain only non-secret profile fields")
+        supplied = profile_prefill
+
+    values: dict[str, object] = {}
+    for field in _PROFILE_INPUT_FIELDS:
+        value = supplied.get(field)
+        values[field] = value if isinstance(value, str) and value.strip() else input_fn(_PROFILE_PROMPTS[field])
+    return values
 
 
 def _load_verified_system_backend() -> tuple[object, type[Exception]]:
