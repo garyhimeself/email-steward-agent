@@ -95,6 +95,24 @@ class DraftingTests(unittest.TestCase):
                 body="Hello", source_identity="wade@example.com", message_id=None, references=None,
             )
 
+    def test_draft_preserves_local_part_case_and_normalizes_only_ascii_domain(self):
+        draft = Draft(
+            recipient=("Partner.Team+EU@example.COM",),
+            cc=(), bcc=(), subject="Update", body="Hello",
+            source_identity="Wade.Sales@example.COM", message_id=None, references=None,
+        )
+
+        self.assertEqual(draft.recipient, ("Partner.Team+EU@example.com",))
+        self.assertEqual(draft.source_identity, "Wade.Sales@example.com")
+
+    def test_draft_rejects_unicode_and_whitespace_mutated_addresses(self):
+        for value in ("groß@example.com", " partner@example.com", "partner@example.com "):
+            with self.assertRaisesRegex(ValueError, "email address"):
+                Draft(
+                    recipient=(value,), cc=(), bcc=(), subject="Update", body="Hello",
+                    source_identity="wade@example.com", message_id=None, references=None,
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

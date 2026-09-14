@@ -137,10 +137,10 @@ def _addresses(header: str | None) -> tuple[str, ...]:
 def _normalize_address(value: object, field: str) -> str:
     if not isinstance(value, str) or _unsafe_text(value):
         raise ValueError(f"{field} must be a safe email address")
-    address = value.strip().casefold()
-    if not _EMAIL.fullmatch(address):
+    if value != value.strip() or not value.isascii() or not _EMAIL.fullmatch(value):
         raise ValueError(f"{field} must be a valid single email address")
-    return address
+    local_part, domain = value.rsplit("@", 1)
+    return f"{local_part}@{domain.lower()}"
 
 
 def _unsafe_text(value: str) -> bool:

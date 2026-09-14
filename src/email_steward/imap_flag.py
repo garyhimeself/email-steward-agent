@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from .approval import ApprovalToken, verify_exact_approval
+from .approval import ApprovalToken, consume_exact_approval, verify_exact_approval
 from .imap_read import ImapReadError, MailIdentity, UIDValidityUnavailableError
 
 
@@ -33,6 +33,7 @@ def star_one(client: FlagImapClient, identity: MailIdentity, token: ApprovalToke
     _, values = client.response("UIDVALIDITY")
     if _uidvalidity(values) != identity.uidvalidity:
         raise UIDValidityUnavailableError("The folder UIDVALIDITY changed, so this message cannot be starred safely.")
+    consume_exact_approval(token, "star", identity, current_turn_id)
     status, _ = client.uid("STORE", str(identity.uid), "+FLAGS.SILENT", "(\\Flagged)")
     _require_ok(status, "UID STORE")
     return StarResult(starred=True)

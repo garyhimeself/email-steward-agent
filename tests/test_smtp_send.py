@@ -65,6 +65,20 @@ class SmtpSendTests(unittest.TestCase):
         self.assertEqual(result.attempts, 1)
         self.assertEqual(len(client.calls), 1)
 
+    def test_partially_refused_recipients_are_uncertain_and_cannot_be_retried(self):
+        message_draft = draft()
+        token = ApprovalToken.for_action("send", message_draft, "turn-1", confirmation="SEND")
+        client = FakeSmtpClient(result={"leader@example.com": (550, b"rejected")})
+
+        result = send_one(client, message_draft, token, "turn-1")
+
+        self.assertFalse(result.sent)
+        self.assertTrue(result.uncertain)
+        self.assertEqual(result.attempts, 1)
+        with self.assertRaisesRegex(Exception, "already used"):
+            send_one(client, message_draft, token, "turn-1")
+        self.assertEqual(len(client.calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

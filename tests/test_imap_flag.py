@@ -49,6 +49,18 @@ class ImapFlagTests(unittest.TestCase):
         store_calls = [call for call in client.calls if call[:2] == ("uid", "STORE")]
         self.assertEqual(store_calls, [("uid", "STORE", "11", "+FLAGS.SILENT", "(\\Flagged)")])
 
+    def test_star_token_cannot_be_reused_after_store_is_attempted(self):
+        client = FakeImapClient()
+        identity = MailIdentity("INBOX", 801, 11)
+        token = ApprovalToken.for_action("star", identity, "turn-1", confirmation="STAR")
+
+        star_one(client, identity, token, "turn-1")
+
+        with self.assertRaisesRegex(ApprovalError, "already used"):
+            star_one(client, identity, token, "turn-1")
+        store_calls = [call for call in client.calls if call[:2] == ("uid", "STORE")]
+        self.assertEqual(len(store_calls), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
