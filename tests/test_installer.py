@@ -13,6 +13,7 @@ from installer.install_agent import (
     TERRA_ACCEPTANCE_PROMPT,
     run_install,
 )
+from email_steward.credentials import CredentialStoreUnavailableError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -241,6 +242,59 @@ class InstallerTests(unittest.TestCase):
             self.assertIsNone(result)
             self.assertEqual(protected.read_text(encoding="utf-8"), "operator file")
             self.assertTrue(any("not empty" in message.lower() for message in events))
+
+    def test_missing_credential_dependency_stops_before_workspace_creation(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "marketing-mail"
+            events = []
+            answers = iter((str(workspace), "yes"))
+
+            result = run_install(
+                PROJECT_ROOT,
+                input_fn=lambda prompt: next(answers),
+                secret_prompt=lambda prompt: self.fail("secret prompt must not run"),
+                credential_store_factory=lambda: (_ for _ in ()).throw(
+                    CredentialStoreUnavailableError("keyring is unavailable")
+                ),
+                imap_factory=lambda profile, secret: self.fail("IMAP must not run"),
+                dependency_runner=lambda command, cwd: 1,
+                output_fn=events.append,
+            )
+
+            self.assertIsNone(result)
+            self.assertFalse(workspace.exists())
+            self.assertTrue(any("keyring" in message.lower() for message in events))
+            self.assertTrue(any("no workspace was created" in message.lower() for message in events))
+
+    def test_successful_dependency_recovery_precedes_workspace_creation(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "marketing-mail"
+            events = []
+            answers = iter((str(workspace), "yes", "Wade", "wade@example.com", "English", "English", "warm", "n"))
+            recovered_store = MemoryCredentialStore()
+            factory_calls = 0
+
+            def credential_store_factory():
+                nonlocal factory_calls
+                factory_calls += 1
+                if factory_calls == 1:
+                    raise CredentialStoreUnavailableError("keyring is unavailable")
+                return recovered_store
+
+            result = run_install(
+                PROJECT_ROOT,
+                input_fn=lambda prompt: next(answers),
+                secret_prompt=lambda prompt: "test-only-secret",
+                credential_store_factory=credential_store_factory,
+                dependency_runner=lambda command, cwd: 0,
+                imap_factory=lambda profile, secret: FakeImapClient(),
+                output_fn=events.append,
+            )
+
+            self.assertIsNotNone(result)
+            self.assertTrue(workspace.is_dir())
+            self.assertEqual(factory_calls, 2)
+            self.assertTrue(any("dependency check completed" in message.lower() for message in events))
 
     def test_installer_persists_an_enabled_daily_brief_choice_without_claiming_a_schedule_exists(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

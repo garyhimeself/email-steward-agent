@@ -9,6 +9,7 @@ import imaplib
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 from typing import Protocol
 from uuid import uuid4
@@ -50,12 +51,18 @@ _PUBLIC_RUNTIME_FILES = (
     "SPEC.md",
 )
 _EXCLUDED_RUNTIME_NAMES = {".email-steward", ".git", "__pycache__", "cache", "logs", "tests", "tmp"}
+_MINIMUM_PYTHON_VERSION = (3, 11)
+_KEYRING_REQUIREMENT = "keyring>=25,<27"
 
 
 class VerificationImapClient(Protocol):
     def select(self, folder: str, readonly: bool = True) -> tuple[object, object]: ...
 
     def logout(self) -> object: ...
+
+
+CredentialStoreFactory = Callable[[], CredentialStoreProtocol]
+DependencyRunner = Callable[[tuple[str, ...], Path], int]
 
 
 @dataclass(frozen=True)
@@ -74,6 +81,8 @@ def run_install(
     input_fn: Callable[[str], str] = input,
     secret_prompt: Callable[[str], str] = getpass.getpass,
     credential_store: CredentialStoreProtocol | None = None,
+    credential_store_factory: CredentialStoreFactory = CredentialStore,
+    dependency_runner: DependencyRunner | None = None,
     imap_factory: Callable[[OperatorProfile, str], VerificationImapClient] | None = None,
     output_fn: Callable[[str], None] = print,
 ) -> InstallResult | None:
@@ -86,12 +95,21 @@ def run_install(
         output_fn("Installation cancelled. No workspace or mailbox settings were created.")
         return None
 
+    store = _preflight_credentials(
+        Path(root),
+        credential_store=credential_store,
+        credential_store_factory=credential_store_factory,
+        dependency_runner=dependency_runner or _run_declared_dependency_install,
+        output_fn=output_fn,
+    )
+    if store is None:
+        return None
+
     if not _install_public_runtime(Path(root), workspace, output_fn):
         return None
 
     paths = WorkspacePaths.from_root(workspace)
     paths.ensure_local_directories()
-    store = credential_store if credential_store is not None else CredentialStore()
     profile = collect_profile_and_secret(input_fn, secret_prompt, store)
     save_profile(profile, paths.config_file)
 
@@ -120,6 +138,57 @@ def run_install(
         daily_brief_enabled=daily_brief_enabled,
         next_step=(LUNA_ACCEPTANCE_PROMPT, TERRA_ACCEPTANCE_PROMPT),
     )
+
+
+def _preflight_credentials(
+    source_root: Path,
+    *,
+    credential_store: CredentialStoreProtocol | None,
+    credential_store_factory: CredentialStoreFactory,
+    dependency_runner: DependencyRunner,
+    output_fn: Callable[[str], None],
+) -> CredentialStoreProtocol | None:
+    """Verify the interpreter and secure credential provider before writing a workspace."""
+    if sys.version_info[:2] < _MINIMUM_PYTHON_VERSION:
+        output_fn("Installation stopped: Python 3.11 or later is required. No workspace was created.")
+        output_fn("安装已停止：需要 Python 3.11 或更高版本。未创建任何工作区。")
+        return None
+
+    if credential_store is not None:
+        return credential_store
+
+    try:
+        return credential_store_factory()
+    except RuntimeError as initial_error:
+        output_fn("Secure credential support is not ready. Installing the declared keyring dependency now.")
+        output_fn("安全凭据组件尚未就绪，正在安装项目声明的 keyring 依赖。")
+        try:
+            return_code = dependency_runner(
+                (sys.executable, "-m", "pip", "install", "--disable-pip-version-check", _KEYRING_REQUIREMENT),
+                source_root.resolve(strict=True),
+            )
+        except (OSError, ValueError) as install_error:
+            output_fn(f"Dependency installation could not start ({install_error}). No workspace was created.")
+            output_fn("依赖安装无法启动。未创建任何工作区；请检查网络和 Python 的 pip 后重试。")
+            return None
+        if return_code != 0:
+            output_fn("Dependency installation failed. No workspace was created; fix the error above and run the installer again.")
+            output_fn("依赖安装失败。未创建任何工作区；请修复上方错误后重新运行安装器。")
+            return None
+        try:
+            store = credential_store_factory()
+        except RuntimeError as recovery_error:
+            output_fn(f"Credential provider is still unavailable ({recovery_error}). No workspace was created.")
+            output_fn("凭据提供程序仍不可用。未创建任何工作区；请启用系统凭据库后重试。")
+            return None
+        output_fn("Credential dependency check completed. The secure operating-system credential provider is ready.")
+        return store
+
+
+def _run_declared_dependency_install(command: tuple[str, ...], cwd: Path) -> int:
+    """Run only the fixed dependency command, forwarding pip output to the operator."""
+    completed = subprocess.run(command, cwd=cwd, check=False)
+    return completed.returncode
 
 
 def _collect_workspace(input_fn: Callable[[str], str], output_fn: Callable[[str], None]) -> Path:
