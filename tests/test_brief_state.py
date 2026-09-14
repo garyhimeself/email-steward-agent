@@ -15,14 +15,13 @@ from email_steward.imap_read import MailIdentity
 UTC = timezone.utc
 
 
-def card_for(identity, content_hash, summary="Needs a product catalogue"):
+def card_for(identity, content_hash):
     return {
         "identity": identity,
         "hash": content_hash,
         "card": {
             "category": "partnership",
-            "summary": summary,
-            "action_items": ["Reply by Friday"],
+            "actions": ["reply"],
             "priority": "high",
         },
     }
@@ -67,38 +66,42 @@ class BriefStateTests(unittest.TestCase):
         self.assertEqual(restored.watermark, first_run)
         self.assertEqual(restored.plan([self.first, self.second]), [self.second])
 
-    def test_rejects_raw_mail_body_embedded_in_semantic_summary(self):
+    def test_rejects_any_free_text_field_instead_of_persisting_mail_content(self):
         state = BriefState.load(self.path)
         run_at = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
         raw_mail = "From: vendor@example.com\nTo: operator@example.com\nSubject: Confidential\nPlease share the attached contract."
 
-        with self.assertRaisesRegex(ValueError, "semantic"):
-            state.commit(run_at, [card_for(self.first, "a" * 64, raw_mail)])
+        unsafe = card_for(self.first, "a" * 64)
+        unsafe["card"]["summary"] = raw_mail
+        with self.assertRaisesRegex(ValueError, "unsupported"):
+            state.commit(run_at, [unsafe])
 
         self.assertFalse(self.path.exists())
 
-    def test_rejects_raw_draft_embedded_in_semantic_action_item(self):
+    def test_rejects_free_text_draft_instead_of_persisting_it_as_an_action(self):
         state = BriefState.load(self.path)
         run_at = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
         draft_card = card_for(self.first, "a" * 64)
-        draft_card["card"]["action_items"] = ["Dear Marta, thank you for your message. I can send the quotation tomorrow."]
+        draft_card["card"]["actions"] = ["Dear Marta, thank you for your message. I can send the quotation tomorrow."]
 
         with self.assertRaisesRegex(ValueError, "action"):
             state.commit(run_at, [draft_card])
 
         self.assertFalse(self.path.exists())
 
-    def test_rejects_attachment_payload_embedded_in_semantic_summary(self):
+    def test_rejects_free_text_attachment_payload_instead_of_persisting_it_as_an_action(self):
         state = BriefState.load(self.path)
         run_at = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
         encoded_attachment = "data:application/pdf;base64," + ("QUJD" * 40)
 
-        with self.assertRaisesRegex(ValueError, "semantic"):
-            state.commit(run_at, [card_for(self.first, "a" * 64, encoded_attachment)])
+        unsafe = card_for(self.first, "a" * 64)
+        unsafe["card"]["actions"] = [encoded_attachment]
+        with self.assertRaisesRegex(ValueError, "action"):
+            state.commit(run_at, [unsafe])
 
         self.assertFalse(self.path.exists())
 
-    def test_state_stores_only_identity_hash_and_minimal_semantic_card_data(self):
+    def test_state_stores_only_identity_hash_and_finite_classification_data(self):
         state = BriefState.load(self.path)
         run_at = datetime(2026, 9, 1, 9, 0, tzinfo=UTC)
         state.commit(run_at, [card_for(self.first, "a" * 64)])
@@ -113,8 +116,7 @@ class BriefStateTests(unittest.TestCase):
                     "hash": "a" * 64,
                     "card": {
                         "category": "partnership",
-                        "summary": "Needs a product catalogue",
-                        "action_items": ["Reply by Friday"],
+                        "actions": ["reply"],
                         "priority": "high",
                     },
                     "recorded_at": run_at.isoformat(),
@@ -123,7 +125,17 @@ class BriefStateTests(unittest.TestCase):
         )
         saved_text = self.path.read_text(encoding="utf-8")
         self.assertNotIn("private email body", saved_text)
-        self.assertNotIn("attachment", saved_text)
+        self.assertNotIn("summary", saved_text)
+
+    def test_load_clears_a_future_watermark_and_future_card_without_retaining_them(self):
+        future = datetime.now(UTC) + timedelta(days=1)
+        self.path.write_text(json.dumps({"version": 2, "watermark": future.isoformat(), "cards": [{"identity": {"folder": "INBOX", "uidvalidity": 801, "uid": 11}, "hash": "a" * 64, "card": {"category": "partnership", "actions": ["reply"], "priority": "high"}, "recorded_at": future.isoformat()}]}), encoding="utf-8")
+
+        restored = BriefState.load(self.path)
+
+        self.assertIsNone(restored.watermark)
+        self.assertEqual(restored.plan([self.first]), [self.first])
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), {"version": 2, "watermark": None, "cards": []})
 
     def test_commit_prunes_cards_older_than_ninety_days(self):
         state = BriefState.load(self.path)

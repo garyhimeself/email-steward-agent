@@ -13,16 +13,12 @@ from uuid import uuid4
 
 
 _RETENTION = timedelta(days=90)
-_CARD_KEYS = {"category", "summary", "action_items", "priority"}
+_VERSION = 2
+_CARD_KEYS = {"category", "actions", "priority"}
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _CATEGORIES = {"customer", "finance", "internal", "operations", "partnership", "sales", "supplier"}
 _PRIORITIES = {"low", "medium", "high", "urgent"}
-_SUMMARY_START = re.compile(r"^(asks|confirms|flags|needs|reports|requests|requires|seeks|shares|updates)\b", re.IGNORECASE)
-_ACTION_START = re.compile(r"^(approve|archive|escalate|follow up|no action|prepare|reply|request|review|schedule|send)\b", re.IGNORECASE)
-_RAW_MAIL_MARKER = re.compile(r"\b(?:bcc|cc|content-disposition|content-type|from|mime-version|reply-to|subject|to)\s*:", re.IGNORECASE)
-_ADDRESS_OR_URL = re.compile(r"(?:\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|https?://)", re.IGNORECASE)
-_ENCODED_PAYLOAD = re.compile(r"(?:data:[^\s]+;base64,|\b[A-Za-z0-9+/]{80,}={0,2}\b|\b[0-9a-f]{80,}\b)", re.IGNORECASE)
-_DRAFT_GREETING = re.compile(r"^(?:dear|hello|hi)\s+", re.IGNORECASE)
+_ACTIONS = {"approve", "archive", "escalate", "follow_up", "no_action", "prepare", "reply", "request", "review", "schedule", "send"}
 
 
 @dataclass
@@ -43,23 +39,30 @@ class BriefState:
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict) or set(data) != {"version", "watermark", "cards"}:
                 raise ValueError("brief state has an unsupported shape")
-            if data["version"] != 1 or not isinstance(data["cards"], list):
+            if data["version"] == 1:
+                # Version 1 allowed free text.  Remove it rather than risk
+                # retaining historical mail content or an old reply draft.
+                _atomic_json_write(path, _empty_payload())
+                return cls(path=path, watermark=None, _cards=[])
+            if data["version"] != _VERSION or not isinstance(data["cards"], list):
                 raise ValueError("brief state has an unsupported version")
             watermark = _parse_timestamp(data["watermark"], "watermark") if data["watermark"] is not None else None
             cards = [_validate_stored_card(card) for card in data["cards"]]
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
             raise ValueError("brief state cannot be safely loaded") from error
-        pruned_cards = _prune(cards, _now_utc())
-        if len(pruned_cards) != len(cards):
+        now = _now_utc()
+        safe_watermark = watermark if watermark is None or watermark <= now else None
+        pruned_cards = [card for card in _prune(cards, now) if _parse_timestamp(card["recorded_at"], "recorded_at") <= now]
+        if len(pruned_cards) != len(cards) or safe_watermark != watermark:
             _atomic_json_write(
                 path,
                 {
-                    "version": 1,
-                    "watermark": watermark.isoformat() if watermark is not None else None,
+                    "version": _VERSION,
+                    "watermark": safe_watermark.isoformat() if safe_watermark is not None else None,
                     "cards": pruned_cards,
                 },
             )
-        return cls(path=path, watermark=watermark, _cards=pruned_cards)
+        return cls(path=path, watermark=safe_watermark, _cards=pruned_cards)
 
     def plan(self, identities: Iterable[object]) -> list[object]:
         """Return caller-provided identities that have not been committed before."""
@@ -83,7 +86,7 @@ class BriefState:
             by_identity[_identity_key(card["identity"])] = card
         next_cards = list(by_identity.values())
         payload = {
-            "version": 1,
+            "version": _VERSION,
             "watermark": success_at.isoformat(),
             "cards": next_cards,
         }
@@ -148,34 +151,16 @@ def _normalize_semantic_card(value: object) -> dict[str, object]:
         raise ValueError("brief entry semantic category is invalid")
     if not isinstance(priority, str) or priority not in _PRIORITIES:
         raise ValueError("brief entry semantic priority is invalid")
-    summary = _normalize_semantic_text(value["summary"], max_length=240, field="semantic")
-    if _SUMMARY_START.match(summary) is None:
-        raise ValueError("brief entry semantic summary must be a short classified statement")
-    action_items = value["action_items"]
-    if not isinstance(action_items, list) or not action_items or len(action_items) > 5:
+    actions = value["actions"]
+    if not isinstance(actions, list) or not actions or len(actions) > 5:
         raise ValueError("brief entry action items are invalid")
-    normalized_actions = [_normalize_semantic_text(action, max_length=160, field="action") for action in action_items]
-    if any(_ACTION_START.match(action) is None for action in normalized_actions):
-        raise ValueError("brief entry action items must be short operator actions")
+    if any(not isinstance(action, str) or action not in _ACTIONS for action in actions):
+        raise ValueError("brief entry action must be a finite operator action")
     return {
         "category": category,
-        "summary": summary,
-        "action_items": normalized_actions,
+        "actions": list(actions),
         "priority": priority,
     }
-
-
-def _normalize_semantic_text(value: object, *, max_length: int, field: str) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > max_length:
-        raise ValueError(f"brief entry {field} text is invalid")
-    if "\r" in value or "\n" in value:
-        raise ValueError(f"brief entry {field} text is invalid")
-    normalized = " ".join(value.split())
-    if _RAW_MAIL_MARKER.search(normalized) or _ADDRESS_OR_URL.search(normalized) or _ENCODED_PAYLOAD.search(normalized):
-        raise ValueError(f"brief entry {field} text is not minimal semantic data")
-    if field == "action" and _DRAFT_GREETING.match(normalized):
-        raise ValueError("brief entry action text cannot contain a draft greeting")
-    return normalized
 
 
 def _prune(cards: list[dict[str, Any]], reference: datetime) -> list[dict[str, Any]]:
@@ -211,3 +196,7 @@ def _atomic_json_write(path: Path, payload: dict[str, object]) -> None:
         temporary.replace(path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _empty_payload() -> dict[str, object]:
+    return {"version": _VERSION, "watermark": None, "cards": []}

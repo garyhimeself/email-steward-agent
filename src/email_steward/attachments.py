@@ -32,6 +32,15 @@ _DECLARED_MIME = re.compile(
     rf"^{_MIME_TOKEN}/{_MIME_TOKEN}(?:\s*;\s*{_MIME_TOKEN}\s*=\s*{_MIME_PARAMETER_VALUE})*\s*$"
 )
 
+# These are intentionally conservative local-viewing limits.  The complete
+# encoded payload is bounded before decoding, and the decoded bytes are bounded
+# again before any file is created.  They protect both a single message and the
+# operator's temporary workspace from accidental or hostile large attachments.
+MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+MAX_TOTAL_ATTACHMENT_BYTES = 50 * 1024 * 1024
+MAX_OOXML_DECLARED_BYTES = 64 * 1024 * 1024
+MAX_OOXML_ENTRIES = 256
+
 
 def safe_attachment_paths(message: Message, temp_dir: Path) -> list[Path]:
     """Materialize only explicitly allowed attachment types in ``temp_dir``.
@@ -45,21 +54,35 @@ def safe_attachment_paths(message: Message, temp_dir: Path) -> list[Path]:
     temp_dir = Path(temp_dir)
     temp_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
-
-    for part in message.walk():
-        if part.is_multipart():
-            continue
-        filename = part.get_filename()
-        if filename is None:
-            continue
-        normalized_name, extension = _normalize_filename(filename)
-        declared_type = _declared_content_type(part)
-        if declared_type not in _ALLOWED_TYPES_BY_EXTENSION.get(extension, set()):
-            continue
-        payload = part.get_payload(decode=True)
-        if not isinstance(payload, bytes) or not _payload_matches_signature(extension, payload):
-            continue
-        paths.append(_write_unique(temp_dir, normalized_name, payload))
+    total_bytes = 0
+    try:
+        for part in message.walk():
+            if part.is_multipart():
+                continue
+            filename = part.get_filename()
+            if filename is None:
+                continue
+            normalized_name, extension = _normalize_filename(filename)
+            declared_type = _declared_content_type(part)
+            if declared_type not in _ALLOWED_TYPES_BY_EXTENSION.get(extension, set()):
+                continue
+            if not _encoded_payload_is_within_limit(part):
+                raise ValueError("single attachment exceeds the safe size limit")
+            payload = part.get_payload(decode=True)
+            if not isinstance(payload, bytes):
+                continue
+            if len(payload) > MAX_ATTACHMENT_BYTES:
+                raise ValueError("single attachment exceeds the safe size limit")
+            if total_bytes + len(payload) > MAX_TOTAL_ATTACHMENT_BYTES:
+                raise ValueError("total attachment size exceeds the safe limit")
+            if not _payload_matches_signature(extension, payload):
+                continue
+            paths.append(_write_unique(temp_dir, normalized_name, payload))
+            total_bytes += len(payload)
+    except Exception:
+        for path in paths:
+            path.unlink(missing_ok=True)
+        raise
     return paths
 
 
@@ -123,11 +146,32 @@ def _payload_matches_signature(extension: str, payload: bytes) -> bool:
     return False
 
 
+def _encoded_payload_is_within_limit(part: Message) -> bool:
+    """Reject transfer bodies that would be unsafe to decode in memory."""
+    encoded = part.get_payload(decode=False)
+    if not isinstance(encoded, (str, bytes)):
+        return False
+    encoded_length = len(encoded.encode("utf-8")) if isinstance(encoded, str) else len(encoded)
+    transfer_encoding = str(part.get("Content-Transfer-Encoding", "")).strip().lower()
+    if transfer_encoding == "base64":
+        base64_bytes = ((MAX_ATTACHMENT_BYTES + 2) // 3) * 4
+        # RFC 2045 commonly folds base64 at 76 characters; reserve line endings
+        # plus a small header/parser tolerance, while still bounding decode input.
+        allowed = base64_bytes + ((base64_bytes + 75) // 76) * 2 + 8192
+    elif transfer_encoding == "quoted-printable":
+        allowed = MAX_ATTACHMENT_BYTES * 3 + 8192
+    else:
+        allowed = MAX_ATTACHMENT_BYTES + 8192
+    return encoded_length <= allowed
+
+
 def _is_ooxml(payload: bytes, required_directory: str) -> bool:
     try:
         with ZipFile(BytesIO(payload)) as archive:
             entries = archive.infolist()
-            if len(entries) > 256 or any(entry.file_size > 128 * 1024 * 1024 for entry in entries):
+            if len(entries) > MAX_OOXML_ENTRIES or any(entry.file_size > MAX_OOXML_DECLARED_BYTES for entry in entries):
+                return False
+            if sum(entry.file_size for entry in entries) > MAX_OOXML_DECLARED_BYTES:
                 return False
             names = {entry.filename for entry in entries}
     except (BadZipFile, OSError):

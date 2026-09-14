@@ -4,11 +4,16 @@ import unittest
 from io import BytesIO
 from email.message import EmailMessage
 from pathlib import Path
-from zipfile import ZipFile
+from zipfile import ZIP_DEFLATED, ZipFile
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from email_steward.attachments import cleanup_temp_files, safe_attachment_paths
+from email_steward.attachments import (
+    MAX_ATTACHMENT_BYTES,
+    MAX_TOTAL_ATTACHMENT_BYTES,
+    cleanup_temp_files,
+    safe_attachment_paths,
+)
 
 
 class SafeAttachmentTests(unittest.TestCase):
@@ -24,7 +29,7 @@ class SafeAttachmentTests(unittest.TestCase):
 
     def _ooxml_payload(self, application_directory):
         payload = BytesIO()
-        with ZipFile(payload, "w") as archive:
+        with ZipFile(payload, "w", compression=ZIP_DEFLATED) as archive:
             archive.writestr("[Content_Types].xml", "<Types />")
             archive.writestr(f"{application_directory}/document.xml", "<document />")
         return payload.getvalue()
@@ -133,6 +138,52 @@ class SafeAttachmentTests(unittest.TestCase):
         malformed_type["Content-Disposition"] = 'attachment; filename="other.txt"'
         message.attach(malformed_type)
 
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+
+        self.assertEqual(safe_attachment_paths(message, temp_dir), [])
+        self.assertEqual(list(temp_dir.iterdir()), [])
+
+    def test_rejects_a_single_allowed_attachment_before_writing_when_it_exceeds_the_limit(self):
+        message = self._message_with_attachments(
+            [("large.txt", "text/plain", b"a" * (MAX_ATTACHMENT_BYTES + 1))]
+        )
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+
+        with self.assertRaisesRegex(ValueError, "single attachment"):
+            safe_attachment_paths(message, temp_dir)
+
+        self.assertEqual(list(temp_dir.iterdir()), [])
+
+    def test_cleans_up_files_from_this_call_when_total_attachment_limit_is_exceeded(self):
+        first = b"a" * (MAX_ATTACHMENT_BYTES - 1024)
+        second = b"b" * (MAX_ATTACHMENT_BYTES - 1024)
+        third = b"c" * (MAX_ATTACHMENT_BYTES - 1024)
+        message = self._message_with_attachments(
+            [
+                ("first.txt", "text/plain", first),
+                ("second.txt", "text/plain", second),
+                ("third.txt", "text/plain", third),
+            ]
+        )
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+
+        with self.assertRaisesRegex(ValueError, "total attachment"):
+            safe_attachment_paths(message, temp_dir)
+
+        self.assertEqual(list(temp_dir.iterdir()), [])
+
+    def test_rejects_ooxml_with_excessive_declared_uncompressed_content(self):
+        payload = BytesIO()
+        with ZipFile(payload, "w", compression=ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", "<Types />")
+            archive.writestr("word/document.xml", "<document />")
+            archive.writestr("word/oversized.xml", b"x" * (64 * 1024 * 1024 + 1))
+        message = self._message_with_attachments(
+            [("brief.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", payload.getvalue())]
+        )
         temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
         self.addCleanup(cleanup_temp_files, temp_dir)
 
