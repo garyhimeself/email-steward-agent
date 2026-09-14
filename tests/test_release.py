@@ -21,10 +21,14 @@ def _load_script(name: str):
     return module
 
 
-def _write_regular(handle: zipfile.ZipFile, name: str, contents: str) -> None:
+def _write_regular(
+    handle: zipfile.ZipFile, name: str, contents: str, *, mode: int | None = None
+) -> None:
+    if mode is None:
+        mode = 0o755 if name == "installer/install_agent.command" else 0o644
     info = zipfile.ZipInfo(name)
     info.create_system = 3
-    info.external_attr = (stat.S_IFREG | 0o644) << 16
+    info.external_attr = (stat.S_IFREG | mode) << 16
     handle.writestr(info, contents)
 
 
@@ -85,6 +89,32 @@ class ReleasePackageTests(unittest.TestCase):
                 "src/email_steward/credentials.py",
             ):
                 self.assertIn(required, verified_members)
+
+    def test_build_preserves_the_macos_installer_executable_permission(self):
+        build_zip = _load_script("build_zip.py")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            archive = Path(temporary_directory) / "release.zip"
+            build_zip.build_archive(ROOT, archive)
+            with zipfile.ZipFile(archive) as handle:
+                entry = handle.getinfo("installer/install_agent.command")
+
+        self.assertEqual((entry.external_attr >> 16) & 0o777, 0o755)
+
+    def test_verify_rejects_a_non_executable_macos_installer(self):
+        verify_release = _load_script("verify_release.py")
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            archive = Path(temporary_directory) / "non-executable-installer.zip"
+            with zipfile.ZipFile(archive, "w") as handle:
+                for name in verify_release.REQUIRED_MEMBERS:
+                    _write_regular(
+                        handle,
+                        name,
+                        "public",
+                        mode=0o644 if name == "installer/install_agent.command" else None,
+                    )
+
+            with self.assertRaisesRegex(ValueError, "permission"):
+                verify_release.verify_archive(archive)
 
     def test_build_refuses_an_output_path_inside_the_source_tree(self):
         build_zip = _load_script("build_zip.py")

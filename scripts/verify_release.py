@@ -7,7 +7,7 @@ from pathlib import PurePosixPath, Path
 import stat
 import zipfile
 
-from release_manifest import RELEASE_MEMBERS, release_members
+from release_manifest import RELEASE_MEMBERS, release_members, release_mode
 
 # Compatibility alias used by package-audit tests.  Unlike the former partial
 # list, this now means every member that a valid release must contain.
@@ -31,6 +31,7 @@ def verify_archive(archive: Path) -> tuple[str, ...]:
         _validate_regular_file(entry)
         member = entry.filename
         _validate_member(member)
+        _validate_expected_mode(entry)
     actual_members = frozenset(members)
     missing = RELEASE_MEMBERS.difference(actual_members)
     unexpected = actual_members.difference(RELEASE_MEMBERS)
@@ -46,6 +47,17 @@ def _validate_regular_file(entry: zipfile.ZipInfo) -> None:
     mode = entry.external_attr >> 16
     if stat.S_IFMT(mode) != stat.S_IFREG:
         raise ValueError(f"forbidden non-regular archive member: {entry.filename!r}")
+
+
+def _validate_expected_mode(entry: zipfile.ZipInfo) -> None:
+    """Require the reviewed portable permission bit for every release file."""
+    actual_mode = (entry.external_attr >> 16) & 0o777
+    expected_mode = release_mode(entry.filename)
+    if actual_mode != expected_mode:
+        raise ValueError(
+            f"unexpected archive member permission for {entry.filename!r}: "
+            f"expected {expected_mode:04o}, got {actual_mode:04o}"
+        )
 
 
 def _validate_member(member: str) -> None:

@@ -40,6 +40,8 @@ MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 MAX_TOTAL_ATTACHMENT_BYTES = 50 * 1024 * 1024
 MAX_OOXML_DECLARED_BYTES = 64 * 1024 * 1024
 MAX_OOXML_ENTRIES = 256
+_OOXML_MACRO_FILENAMES = frozenset({"vbaproject.bin", "vbadata.xml"})
+_OOXML_MACRO_CONTENT_MARKERS = (b"macroenabled", b"vbaproject")
 
 
 def safe_attachment_paths(message: Message, temp_dir: Path) -> list[Path]:
@@ -186,9 +188,24 @@ def _is_ooxml(payload: bytes, required_directory: str) -> bool:
             if sum(entry.file_size for entry in entries) > MAX_OOXML_DECLARED_BYTES:
                 return False
             names = {entry.filename for entry in entries}
+            if _contains_ooxml_macro(archive, entries):
+                return False
     except (BadZipFile, OSError):
         return False
     return "[Content_Types].xml" in names and any(name.startswith(required_directory) for name in names)
+
+
+def _contains_ooxml_macro(archive: ZipFile, entries) -> bool:
+    """Reject macro artifacts even when a macro file is renamed as DOCX/XLSX."""
+    for entry in entries:
+        member_name = entry.filename.replace("\\", "/").casefold().rsplit("/", 1)[-1]
+        if member_name in _OOXML_MACRO_FILENAMES:
+            return True
+    try:
+        content_types = archive.read("[Content_Types].xml").lower()
+    except KeyError:
+        return False
+    return any(marker in content_types for marker in _OOXML_MACRO_CONTENT_MARKERS)
 
 
 def _is_plain_utf8_text(payload: bytes) -> bool:

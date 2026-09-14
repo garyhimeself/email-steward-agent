@@ -57,6 +57,19 @@ RELEASE_MEMBERS = frozenset(
     }
 )
 
+# ZIP external attributes are the portable record of executable permission for
+# macOS and other POSIX extractors.  Do not infer this from the host filesystem:
+# release builds may run on Windows, which does not preserve the Git executable
+# bit in ``stat()`` results.
+EXECUTABLE_MEMBERS = frozenset({"installer/install_agent.command"})
+
+
+def release_mode(member: str) -> int:
+    """Return the exact POSIX mode required for one reviewed release member."""
+    if member not in RELEASE_MEMBERS:
+        raise ValueError(f"unknown release member: {member}")
+    return 0o755 if member in EXECUTABLE_MEMBERS else 0o644
+
 
 def release_members() -> tuple[str, ...]:
     """Return the stable, reviewed order used by both build and verification."""

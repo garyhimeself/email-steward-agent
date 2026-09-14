@@ -28,7 +28,7 @@ class SafeAttachmentTests(unittest.TestCase):
             )
         return message
 
-    def _ooxml_payload(self, application_directory):
+    def _ooxml_payload(self, application_directory, *, macro_member=None):
         payload = BytesIO()
         with ZipFile(payload, "w", compression=ZIP_DEFLATED) as archive:
             for filename, content in (
@@ -38,6 +38,8 @@ class SafeAttachmentTests(unittest.TestCase):
                 info = ZipInfo(filename, date_time=(2020, 1, 1, 0, 0, 0))
                 info.compress_type = ZIP_DEFLATED
                 archive.writestr(info, content)
+            if macro_member is not None:
+                archive.writestr(macro_member, b"unsafe VBA project")
         return payload.getvalue()
 
     def test_allowlist_materializes_only_safe_business_file_types(self):
@@ -219,6 +221,27 @@ class SafeAttachmentTests(unittest.TestCase):
             archive.writestr("word/oversized.xml", b"x" * (64 * 1024 * 1024 + 1))
         message = self._message_with_attachments(
             [("brief.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", payload.getvalue())]
+        )
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+
+        self.assertEqual(safe_attachment_paths(message, temp_dir), [])
+        self.assertEqual(list(temp_dir.iterdir()), [])
+
+    def test_rejects_macro_payloads_disguised_as_allowed_ooxml_documents(self):
+        message = self._message_with_attachments(
+            [
+                (
+                    "brief.docx",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    self._ooxml_payload("word", macro_member="word/vbaProject.bin"),
+                ),
+                (
+                    "costs.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    self._ooxml_payload("xl", macro_member="xl/VBAPROJECT.BIN"),
+                ),
+            ]
         )
         temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
         self.addCleanup(cleanup_temp_files, temp_dir)

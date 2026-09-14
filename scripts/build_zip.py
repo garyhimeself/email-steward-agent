@@ -12,7 +12,7 @@ SCRIPTS_DIRECTORY = Path(__file__).resolve().parent
 if str(SCRIPTS_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIRECTORY))
 
-from release_manifest import release_members
+from release_manifest import release_members, release_mode
 from verify_release import verify_archive
 
 
@@ -39,7 +39,7 @@ def build_archive(source_root: Path, output: Path) -> Path:
                 info = zipfile.ZipInfo(member, date_time=FIXED_TIMESTAMP)
                 info.create_system = 3
                 info.compress_type = zipfile.ZIP_DEFLATED
-                info.external_attr = 0o100644 << 16
+                info.external_attr = (0o100000 | release_mode(member)) << 16
                 archive.writestr(info, source.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
         temporary.replace(output)
     finally:
