@@ -1,0 +1,254 @@
+import sys
+import tempfile
+import unittest
+from io import BytesIO
+from email.message import EmailMessage
+from pathlib import Path
+from unittest.mock import patch
+from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from email_steward.attachments import (
+    MAX_ATTACHMENT_BYTES,
+    MAX_TOTAL_ATTACHMENT_BYTES,
+    cleanup_temp_files,
+    safe_attachment_paths,
+)
+
+
+class SafeAttachmentTests(unittest.TestCase):
+    def _message_with_attachments(self, attachments):
+        message = EmailMessage()
+        message.set_content("Please review the attached files.")
+        for filename, content_type, content in attachments:
+            maintype, subtype = content_type.split("/", 1)
+            message.add_attachment(
+                content, maintype=maintype, subtype=subtype, filename=filename
+            )
+        return message
+
+    def _ooxml_payload(self, application_directory, *, macro_member=None):
+        payload = BytesIO()
+        with ZipFile(payload, "w", compression=ZIP_DEFLATED) as archive:
+            for filename, content in (
+                ("[Content_Types].xml", b"<Types />"),
+                (f"{application_directory}/document.xml", b"<document />"),
+            ):
+                info = ZipInfo(filename, date_time=(2020, 1, 1, 0, 0, 0))
+                info.compress_type = ZIP_DEFLATED
+                archive.writestr(info, content)
+            if macro_member is not None:
+                archive.writestr(macro_member, b"unsafe VBA project")
+        return payload.getvalue()
+
+    def test_allowlist_materializes_only_safe_business_file_types(self):
+        message = self._message_with_attachments(
+            [
+                ("proposal.pdf", "application/pdf", b"%PDF-1.7\n% safe test bytes"),
+                ("brief.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", self._ooxml_payload("word")),
+                ("costs.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", self._ooxml_payload("xl")),
+                ("contacts.csv", "text/csv", b"name,value\nAda,1\n"),
+                ("notes.txt", "text/plain", b"safe test text"),
+                ("product.png", "image/png", b"\x89PNG\r\n\x1a\n safe test bytes"),
+            ]
+        )
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+
+        paths = safe_attachment_paths(message, temp_dir)
+
+        self.assertEqual(
+            [path.name for path in paths],
+            ["proposal.pdf", "brief.docx", "costs.xlsx", "contacts.csv", "notes.txt", "product.png"],
+        )
+        self.assertTrue(all(path.parent == temp_dir for path in paths))
+        self.assertEqual(
+            [path.read_bytes() for path in paths],
+            [
+                b"%PDF-1.7\n% safe test bytes",
+                self._ooxml_payload("word"),
+                self._ooxml_payload("xl"),
+                b"name,value\nAda,1\n",
+                b"safe test text",
+                b"\x89PNG\r\n\x1a\n safe test bytes",
+            ],
+        )
+
+    def test_rejects_executables_scripts_macro_documents_and_archives(self):
+        message = self._message_with_attachments(
+            [
+                ("installer.exe", "application/vnd.microsoft.portable-executable", b"MZ"),
+                ("setup.ps1", "text/plain", b"Write-Host unsafe"),
+                ("payload.js", "application/javascript", b"alert('unsafe')"),
+                ("budget.xlsm", "application/vnd.ms-excel.sheet.macroEnabled.12", b"PK\x03\x04"),
+                ("letter.docm", "application/vnd.ms-word.document.macroEnabled.12", b"PK\x03\x04"),
+                ("bundle.zip", "application/zip", b"PK\x03\x04"),
+            ]
+        )
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+
+        paths = safe_attachment_paths(message, temp_dir)
+
+        self.assertEqual(paths, [])
+        self.assertEqual(list(temp_dir.iterdir()), [])
+
+    def test_normalizes_filename_and_never_writes_outside_the_temp_directory(self):
+        message = self._message_with_attachments(
+            [("..\\..//Q3 proposal (final).pdf", "application/pdf", b"%PDF-1.7\n% safe test bytes")]
+        )
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+
+        paths = safe_attachment_paths(message, temp_dir)
+
+        self.assertEqual([path.name for path in paths], ["Q3_proposal_final.pdf"])
+        self.assertTrue(paths[0].resolve().is_relative_to(temp_dir.resolve()))
+
+    def test_cleanup_removes_all_temporary_attachment_bytes(self):
+        message = self._message_with_attachments([("proposal.pdf", "application/pdf", b"%PDF-1.7\n% safe test bytes")])
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+
+        safe_attachment_paths(message, temp_dir)
+        cleanup_temp_files(temp_dir)
+
+        self.assertFalse(temp_dir.exists())
+
+    def test_rejects_allowed_names_when_payload_signatures_do_not_match(self):
+        message = self._message_with_attachments(
+            [
+                ("invoice.pdf", "application/pdf", b"This is not a PDF"),
+                ("photo.png", "image/png", b"This is not a PNG"),
+                ("brief.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", b"PK\x03\x04 not a complete OOXML archive"),
+                ("contacts.csv", "text/csv", b"\xff\xfe\x00\x01"),
+            ]
+        )
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+
+        self.assertEqual(safe_attachment_paths(message, temp_dir), [])
+        self.assertEqual(list(temp_dir.iterdir()), [])
+
+    def test_rejects_missing_or_malformed_declared_mime_types(self):
+        message = EmailMessage()
+        message.set_content("Please review the attached files.")
+
+        missing_type = EmailMessage()
+        missing_type.set_payload(b"safe text")
+        missing_type["Content-Disposition"] = 'attachment; filename="notes.txt"'
+        message.make_mixed()
+        message.attach(missing_type)
+
+        malformed_type = EmailMessage()
+        malformed_type.set_payload(b"safe text")
+        malformed_type["Content-Type"] = "text/plain; charset"
+        malformed_type["Content-Disposition"] = 'attachment; filename="other.txt"'
+        message.attach(malformed_type)
+
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+
+        self.assertEqual(safe_attachment_paths(message, temp_dir), [])
+        self.assertEqual(list(temp_dir.iterdir()), [])
+
+    def test_rejects_a_single_allowed_attachment_before_writing_when_it_exceeds_the_limit(self):
+        message = self._message_with_attachments(
+            [("large.txt", "text/plain", b"a" * (MAX_ATTACHMENT_BYTES + 1))]
+        )
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+
+        with self.assertRaisesRegex(ValueError, "single attachment"):
+            safe_attachment_paths(message, temp_dir)
+
+        self.assertEqual(list(temp_dir.iterdir()), [])
+
+    def test_cleans_up_files_from_this_call_when_total_attachment_limit_is_exceeded(self):
+        first = b"a" * (MAX_ATTACHMENT_BYTES - 1024)
+        second = b"b" * (MAX_ATTACHMENT_BYTES - 1024)
+        third = b"c" * (MAX_ATTACHMENT_BYTES - 1024)
+        message = self._message_with_attachments(
+            [
+                ("first.txt", "text/plain", first),
+                ("second.txt", "text/plain", second),
+                ("third.txt", "text/plain", third),
+            ]
+        )
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+
+        with self.assertRaisesRegex(ValueError, "total attachment"):
+            safe_attachment_paths(message, temp_dir)
+
+        self.assertEqual(list(temp_dir.iterdir()), [])
+
+    def test_rejects_total_limit_before_decoding_or_writing_any_candidate(self):
+        message = self._message_with_attachments(
+            [
+                ("first.txt", "text/plain", b"a" * 20),
+                ("second.txt", "text/plain", b"b" * 20),
+                ("third.txt", "text/plain", b"c" * 20),
+            ]
+        )
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+        decoded_candidates = []
+        original_get_payload = EmailMessage.get_payload
+
+        def track_decode(part, *args, **kwargs):
+            if kwargs.get("decode") and part.get_filename() is not None:
+                decoded_candidates.append(part.get_filename())
+            return original_get_payload(part, *args, **kwargs)
+
+        with patch("email_steward.attachments.MAX_ATTACHMENT_BYTES", 25), patch(
+            "email_steward.attachments.MAX_TOTAL_ATTACHMENT_BYTES", 50
+        ), patch.object(EmailMessage, "get_payload", autospec=True, side_effect=track_decode), patch(
+            "email_steward.attachments._write_unique"
+        ) as write_file:
+            with self.assertRaisesRegex(ValueError, "total attachment"):
+                safe_attachment_paths(message, temp_dir)
+
+        self.assertEqual(decoded_candidates, [])
+        write_file.assert_not_called()
+        self.assertEqual(list(temp_dir.iterdir()), [])
+
+    def test_rejects_ooxml_with_excessive_declared_uncompressed_content(self):
+        payload = BytesIO()
+        with ZipFile(payload, "w", compression=ZIP_DEFLATED) as archive:
+            archive.writestr("[Content_Types].xml", "<Types />")
+            archive.writestr("word/document.xml", "<document />")
+            archive.writestr("word/oversized.xml", b"x" * (64 * 1024 * 1024 + 1))
+        message = self._message_with_attachments(
+            [("brief.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", payload.getvalue())]
+        )
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+
+        self.assertEqual(safe_attachment_paths(message, temp_dir), [])
+        self.assertEqual(list(temp_dir.iterdir()), [])
+
+    def test_rejects_macro_payloads_disguised_as_allowed_ooxml_documents(self):
+        message = self._message_with_attachments(
+            [
+                (
+                    "brief.docx",
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    self._ooxml_payload("word", macro_member="word/vbaProject.bin"),
+                ),
+                (
+                    "costs.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    self._ooxml_payload("xl", macro_member="xl/VBAPROJECT.BIN"),
+                ),
+            ]
+        )
+        temp_dir = Path(tempfile.mkdtemp(dir=Path(__file__).parent))
+        self.addCleanup(cleanup_temp_files, temp_dir)
+
+        self.assertEqual(safe_attachment_paths(message, temp_dir), [])
+        self.assertEqual(list(temp_dir.iterdir()), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

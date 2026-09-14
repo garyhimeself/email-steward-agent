@@ -1,0 +1,11 @@
+{
+  "name": "Your Name",
+  "email": "you@your-company.example",
+  "preferred_language": "English",
+  "reply_language": "English",
+  "reply_tone": "professional and concise",
+  "imap_host": "imap.qiye.aliyun.com",
+  "imap_port": 993,
+  "smtp_host": "smtp.qiye.aliyun.com",
+  "smtp_port": 465
+}
