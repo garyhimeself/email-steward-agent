@@ -33,6 +33,12 @@ def _write_regular(
 
 
 class ReleasePackageTests(unittest.TestCase):
+    def test_release_excludes_the_legacy_credential_setup_entrypoint(self):
+        manifest = _load_script("release_manifest.py")
+
+        self.assertNotIn("installer/setup_email.py", manifest.RELEASE_MEMBERS)
+        self.assertFalse((ROOT / "installer" / "setup_email.py").exists())
+
     def test_verify_rejects_private_or_generated_zip_members(self):
         verify_release = _load_script("verify_release.py")
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -89,7 +95,9 @@ class ReleasePackageTests(unittest.TestCase):
                 "UPGRADE.md",
                 "UPGRADE.zh-CN.md",
                 "src/email_steward/credentials.py",
+                "src/email_steward/preflight.py",
                 ".agents/skills/business-email-managerment/SKILL.md",
+                "tests/test_preflight.py",
             ):
                 self.assertIn(required, verified_members)
 

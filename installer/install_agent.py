@@ -27,6 +27,7 @@ from email_steward.credentials import (
     collect_profile_and_secret,
 )
 from email_steward.paths import WorkspacePaths
+from email_steward.preflight import format_preflight_messages, run_local_network_preflight
 from email_steward.profile import OperatorProfile, save_profile
 
 
@@ -458,15 +459,24 @@ def _report_credential_read_failure(output_fn: Callable[[str], None]) -> None:
     )
 
 
-def parse_profile_prefill(argv: Sequence[str] | None = None) -> dict[str, str]:
-    """Parse only non-secret data collected by a Codex chat before launching setup."""
+def _build_argument_parser() -> _SafeArgumentParser:
     parser = _SafeArgumentParser(add_help=True)
+    parser.add_argument(
+        "--preflight",
+        action="store_true",
+        help="show credential-free local network diagnostics, then exit",
+    )
     parser.add_argument("--name")
     parser.add_argument("--email")
     parser.add_argument("--preferred-language", dest="preferred_language")
     parser.add_argument("--reply-language", dest="reply_language")
     parser.add_argument("--reply-tone", dest="reply_tone")
-    parsed = parser.parse_args(argv)
+    return parser
+
+
+def parse_profile_prefill(argv: Sequence[str] | None = None) -> dict[str, str]:
+    """Parse only non-secret data collected by a Codex chat before launching setup."""
+    parsed = _build_argument_parser().parse_args(argv)
     return {
         field: value
         for field in _PROFILE_PREFILL_FIELDS
@@ -474,7 +484,32 @@ def parse_profile_prefill(argv: Sequence[str] | None = None) -> dict[str, str]:
     }
 
 
-if __name__ == "__main__":
-    run_install(
-        Path(__file__).resolve().parents[1], profile_prefill=parse_profile_prefill()
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    preflight_runner: Callable[[], object] = run_local_network_preflight,
+    output_fn: Callable[[str], None] = print,
+    install_fn: Callable[..., InstallResult | None] = run_install,
+) -> int:
+    """Run the credential-free preflight before any setup or hidden password prompt."""
+    parsed = _build_argument_parser().parse_args(argv)
+    observation = preflight_runner()
+    for message in format_preflight_messages(observation):
+        output_fn(message)
+    if parsed.preflight:
+        return 0
+    profile_prefill = {
+        field: value
+        for field in _PROFILE_PREFILL_FIELDS
+        if isinstance((value := getattr(parsed, field)), str) and value.strip()
+    }
+    install_fn(
+        Path(__file__).resolve().parents[1],
+        profile_prefill=profile_prefill,
+        output_fn=output_fn,
     )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

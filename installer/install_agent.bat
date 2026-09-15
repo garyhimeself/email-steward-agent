@@ -1,5 +1,6 @@
 @echo off
 setlocal
+chcp 65001 >nul
 where py >nul 2>nul
 if errorlevel 1 (
   echo [Email Steward] Python 3.11 or later is required. Install Python, then run this file again.
