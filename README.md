@@ -1,5 +1,19 @@
 # Email Steward Agent
 
+[English](README.md) | [简体中文](README.zh-CN.md)
+
+## 中文简介
+
+**邮件管家 Agent** 帮助营销同事在 Codex 中安全地读取自己的阿里企业邮箱、整理日报，并起草开发合作邮件回复。它面向 Windows 和 macOS 上的一位操作者及其个人邮箱。
+
+- 不会自动发送邮件；发送、密送、回复全部和星标均需对当前展示的具体项目逐项确认。
+- 收取与日报建议使用 **Luna，低推理**；撰写、翻译和自然化润色建议使用 **Terra，低推理**。
+- 第三方客户端安全密码只保存于操作者本机的系统凭据库，绝不应发送到 Codex 对话或提交至仓库。
+
+完整中文安装、使用和排错说明请见 [README.zh-CN.md](README.zh-CN.md)。
+
+---
+
 Email Steward helps a marketing teammate safely read their own Alibaba Enterprise Mail, prepare a daily brief, and write a reply draft in Codex. It is designed for one operator and one mailbox on Windows or macOS.
 
 It never sends automatically. A send, Bcc, reply-all, or star requires an explicit confirmation for the exact displayed item in the current chat.
