@@ -81,6 +81,7 @@ class ReleasePackageTests(unittest.TestCase):
                 "installer/install_agent.py",
                 "installer/install_agent.bat",
                 "installer/install_agent.command",
+                "installer/secure_install_window.ps1",
                 "AGENTS.md",
                 ".agents/skills/humanizer/SKILL.md",
                 "config/operator.example.json",

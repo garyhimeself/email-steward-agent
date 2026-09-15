@@ -103,6 +103,15 @@ class InstallResult:
     next_step: tuple[str, str]
 
 
+@dataclass(frozen=True)
+class InstallRequest:
+    """Non-secret values confirmed in chat before the secure local window opens."""
+
+    workspace: Path
+    daily_brief_enabled: bool
+    profile_prefill: Mapping[str, str]
+
+
 def run_install(
     root: Path,
     input_fn: Callable[[str], str] = input,
@@ -113,15 +122,22 @@ def run_install(
     imap_factory: Callable[[OperatorProfile, str], VerificationImapClient] | None = None,
     output_fn: Callable[[str], None] = print,
     profile_prefill: Mapping[str, object] | None = None,
+    request: InstallRequest | None = None,
 ) -> InstallResult | None:
     """Run the consent-first installer; no workspace is created before consent."""
     output_fn(ALIBABA_THIRD_PARTY_PASSWORD_PATH)
     output_fn("Generate the password, copy it now, and keep it safe: it is shown only once.")
 
-    workspace = _collect_workspace(input_fn, output_fn)
-    if not _confirmed(input_fn("Create this workspace? [y/N]: ")):
-        output_fn("Installation cancelled. No workspace or mailbox settings were created.")
-        return None
+    if request is None:
+        workspace = _collect_workspace(input_fn, output_fn)
+        if not _confirmed(input_fn("Create this workspace? [y/N]: ")):
+            output_fn("Installation cancelled. No workspace or mailbox settings were created.")
+            return None
+        effective_profile_prefill = profile_prefill
+    else:
+        workspace = request.workspace
+        output_fn(f"Target workspace: {workspace}")
+        effective_profile_prefill = request.profile_prefill
 
     store = _preflight_credentials(
         Path(root),
@@ -140,7 +156,7 @@ def run_install(
     paths = WorkspacePaths.from_root(workspace)
     paths.ensure_local_directories()
     profile = collect_profile_and_secret(
-        input_fn, secret_prompt, store, profile_prefill=profile_prefill
+        input_fn, secret_prompt, store, profile_prefill=effective_profile_prefill
     )
     save_profile(profile, paths.config_file)
 
@@ -173,7 +189,11 @@ def run_install(
         return None
     output_fn("Read-only IMAP verification succeeded. No email was changed.")
 
-    daily_brief_enabled = _daily_brief_enabled(input_fn("Enable daily brief now? [y/N]: "))
+    daily_brief_enabled = (
+        request.daily_brief_enabled
+        if request is not None
+        else _daily_brief_enabled(input_fn("Enable daily brief now? [y/N]: "))
+    )
     _save_daily_brief_preference(paths.config_file.parent / "daily-brief.json", daily_brief_enabled)
     if daily_brief_enabled:
         output_fn("Daily brief preference is enabled. Configure its format and schedule in your Codex project before it runs; installation did not create a schedule.")
@@ -471,6 +491,9 @@ def _build_argument_parser() -> _SafeArgumentParser:
     parser.add_argument("--preferred-language", dest="preferred_language")
     parser.add_argument("--reply-language", dest="reply_language")
     parser.add_argument("--reply-tone", dest="reply_tone")
+    parser.add_argument("--secure-window", action="store_true")
+    parser.add_argument("--workspace")
+    parser.add_argument("--daily-brief", choices=("on", "off"))
     return parser
 
 
@@ -482,6 +505,39 @@ def parse_profile_prefill(argv: Sequence[str] | None = None) -> dict[str, str]:
         for field in _PROFILE_PREFILL_FIELDS
         if isinstance((value := getattr(parsed, field)), str) and value.strip()
     }
+
+
+def _profile_prefill_from_parsed(parsed: argparse.Namespace) -> dict[str, str]:
+    return {
+        field: value
+        for field in _PROFILE_PREFILL_FIELDS
+        if isinstance((value := getattr(parsed, field)), str) and value.strip()
+    }
+
+
+def _install_request_from_parsed(parsed: argparse.Namespace) -> InstallRequest | None:
+    if not parsed.secure_window:
+        return None
+    profile_prefill = _profile_prefill_from_parsed(parsed)
+    if (
+        not isinstance(parsed.workspace, str)
+        or not parsed.workspace.strip()
+        or parsed.daily_brief not in {"on", "off"}
+        or set(profile_prefill) != set(_PROFILE_PREFILL_FIELDS)
+    ):
+        _build_argument_parser().error(
+            "Secure-window installation requires all non-secret setup values."
+        )
+    return InstallRequest(
+        workspace=Path(parsed.workspace.strip()).expanduser().resolve(strict=False),
+        daily_brief_enabled=parsed.daily_brief == "on",
+        profile_prefill=profile_prefill,
+    )
+
+
+def parse_install_request(argv: Sequence[str] | None = None) -> InstallRequest | None:
+    """Parse a complete non-secret request for the dedicated Windows input window."""
+    return _install_request_from_parsed(_build_argument_parser().parse_args(argv))
 
 
 def main(
@@ -498,17 +554,14 @@ def main(
         output_fn(message)
     if parsed.preflight:
         return 0
-    profile_prefill = {
-        field: value
-        for field in _PROFILE_PREFILL_FIELDS
-        if isinstance((value := getattr(parsed, field)), str) and value.strip()
-    }
-    install_fn(
+    request = _install_request_from_parsed(parsed)
+    result = install_fn(
         Path(__file__).resolve().parents[1],
-        profile_prefill=profile_prefill,
+        profile_prefill=None if request is not None else _profile_prefill_from_parsed(parsed),
+        request=request,
         output_fn=output_fn,
     )
-    return 0
+    return 0 if result is not None else 1
 
 
 if __name__ == "__main__":

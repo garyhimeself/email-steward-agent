@@ -24,6 +24,7 @@ RELEASE_MEMBERS = frozenset(
         "installer/install_agent.bat",
         "installer/install_agent.command",
         "installer/install_agent.py",
+        "installer/secure_install_window.ps1",
         "src/email_steward/__init__.py",
         "src/email_steward/approval.py",
         "src/email_steward/attachments.py",
