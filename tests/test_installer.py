@@ -119,6 +119,38 @@ class InstallerTests(unittest.TestCase):
             self.assertEqual(secret_prompts, ["Alibaba third-party client password: "])
             self.assertEqual(result.profile.email, "wade@example.com")
 
+    def test_secure_window_request_never_asks_for_nonsecret_terminal_input(self):
+        from installer import install_agent
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "marketing-mail"
+            request = install_agent.parse_install_request(
+                [
+                    "--secure-window",
+                    "--workspace", str(workspace),
+                    "--daily-brief", "off",
+                    "--name", "Wade Su",
+                    "--email", "wade@example.com",
+                    "--preferred-language", "Chinese",
+                    "--reply-language", "English",
+                    "--reply-tone", "professional and friendly",
+                ]
+            )
+            secret_prompts = []
+            result = run_install(
+                PROJECT_ROOT,
+                input_fn=lambda prompt: self.fail(f"unexpected terminal prompt: {prompt}"),
+                secret_prompt=lambda prompt: secret_prompts.append(prompt) or "test-only-secret",
+                credential_store=MemoryCredentialStore(),
+                imap_factory=lambda profile, secret: FakeImapClient(),
+                output_fn=lambda message: None,
+                request=request,
+            )
+
+            self.assertIsNotNone(result)
+            self.assertFalse(result.daily_brief_enabled)
+            self.assertEqual(secret_prompts, ["Alibaba third-party client password: "])
+
     def test_missing_prefill_field_falls_back_only_for_that_nonsecret_field(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory) / "marketing-mail"
@@ -388,6 +420,22 @@ class InstallerTests(unittest.TestCase):
         self.assertIn('"$SCRIPT_DIR/install_agent.py"', macos_launcher)
         self.assertIn('"$@"', macos_launcher)
         self.assertNotIn("/Users/", macos_launcher)
+
+    def test_windows_secure_window_launcher_uses_a_separate_powershell_without_password_fallback(self):
+        launcher = (PROJECT_ROOT / "installer" / "install_agent.bat").read_text(encoding="utf-8")
+
+        self.assertIn("--secure-window", launcher)
+        self.assertIn("powershell.exe", launcher.lower())
+        self.assertIn("start", launcher.lower())
+        self.assertIn("-noprofile", launcher.lower())
+        self.assertNotIn("set /p", launcher.lower())
+        self.assertNotIn("password", launcher.lower())
+        window_script = (PROJECT_ROOT / "installer" / "secure_install_window.ps1").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("$PSScriptRoot", window_script)
+        self.assertIn("Read-Host", window_script)
+        self.assertNotIn("password", window_script.lower())
 
     def test_launchers_explain_when_python_311_is_not_available(self):
         windows_launcher = (PROJECT_ROOT / "installer" / "install_agent.bat").read_text(encoding="utf-8")

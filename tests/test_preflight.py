@@ -135,6 +135,27 @@ class LocalNetworkPreflightTests(unittest.TestCase):
 
         self.assertIn("chcp 65001", launcher)
 
+    def test_installer_returns_nonzero_when_setup_stops_without_a_result(self):
+        from installer.install_agent import main
+
+        observation = LocalNetworkPreflight(
+            hostname="operator-laptop",
+            imap_host="imap.qiye.aliyun.com",
+            imap_port=993,
+            dns_addresses=(),
+            tls_connected=True,
+            public_ip="198.51.100.8",
+        )
+
+        exit_code = main(
+            [],
+            preflight_runner=lambda: observation,
+            output_fn=lambda message: None,
+            install_fn=lambda *args, **kwargs: None,
+        )
+
+        self.assertEqual(exit_code, 1)
+
 
 if __name__ == "__main__":
     unittest.main()

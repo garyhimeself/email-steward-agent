@@ -31,8 +31,8 @@ Do not use or recommend Sol, high reasoning, or higher reasoning. The work is st
 
 1. Read [INSTALL.md](INSTALL.md), then run the Windows or macOS launcher.
 2. Before setup, create an Alibaba **third-party client password** in webmail: `Settings → Account & Security → Account Security → Third-party client login security management → Generate new password`.
-3. Copy and store that password immediately. It is shown only once. Enter it only in the local hidden password prompt—never into a Codex chat.
-4. The installer asks where to create the workspace, asks for confirmation, saves non-secret preferences locally, and performs a read-only IMAP check. It does not change mail.
+3. Copy and store that password immediately. It is shown only once. On Windows, Codex opens a **separate secure PowerShell window** for the hidden local prompt—never enter it into a Codex chat.
+4. Codex collects the workspace and non-secret preferences in chat, shows a summary for confirmation, then opens the secure window for the password. The integrated terminal is never a password fallback. The installer performs a read-only IMAP check and does not change mail.
 5. Create a Codex project whose file scope is that workspace, then complete the Luna and Terra acceptance prompts shown by the installer.
 
 ## Safe everyday use

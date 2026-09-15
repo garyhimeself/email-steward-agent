@@ -15,4 +15,18 @@ if errorlevel 1 (
   pause
   exit /b 1
 )
-py -3 "%~dp0install_agent.py" %*
+if /I "%~1"=="--preflight" (
+  py -3 "%~dp0install_agent.py" %*
+  exit /b %errorlevel%
+)
+
+if /I "%~1"=="--secure-window" (
+  start "Email Steward - Secure Setup" /wait powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0secure_install_window.ps1" %*
+  exit /b %errorlevel%
+)
+
+echo [Email Steward] Setup must be started from Codex so it can open a separate secure PowerShell window.
+echo [邮件管家] 请从 Codex 启动安装；它会打开独立的安全 PowerShell 窗口。
+echo Run this file with --preflight only for a credential-free network check.
+echo 仅进行无凭据网络预检时，请使用 --preflight。
+exit /b 2
