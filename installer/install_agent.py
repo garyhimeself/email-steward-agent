@@ -120,6 +120,13 @@ class CredentialRepairRequest:
     workspace: Path
 
 
+@dataclass(frozen=True)
+class WorkspaceUpgradeRequest:
+    """A non-secret request that refreshes Agent files in an existing workspace."""
+
+    workspace: Path
+
+
 def run_install(
     root: Path,
     input_fn: Callable[[str], str] = input,
@@ -273,6 +280,36 @@ def run_credential_repair(
     return profile
 
 
+def run_workspace_upgrade(
+    root: Path,
+    workspace: str | Path,
+    *,
+    output_fn: Callable[[str], None] = print,
+) -> bool:
+    """Update only Agent-controlled public files in an existing workspace."""
+    source_root = Path(root).resolve(strict=False)
+    workspace_path = Path(workspace).expanduser().resolve(strict=False)
+    if not workspace_path.is_dir():
+        output_fn("Workspace upgrade stopped: the target workspace folder does not exist.")
+        return False
+    try:
+        load_workspace_profile(workspace_path)
+        _validate_public_package(source_root)
+    except (OSError, ValueError, WorkspaceSessionError) as error:
+        output_fn(f"Workspace upgrade stopped: the Agent package or workspace is unavailable ({error}).")
+        return False
+    try:
+        for directory_name in _PUBLIC_RUNTIME_DIRECTORIES:
+            _update_public_directory(source_root / directory_name, workspace_path / directory_name)
+        for file_name in _PUBLIC_RUNTIME_FILES:
+            shutil.copy2(source_root / file_name, workspace_path / file_name)
+    except OSError as error:
+        output_fn(f"Workspace upgrade stopped while updating Agent files ({error}).")
+        return False
+    output_fn("Workspace upgrade succeeded. Local mailbox configuration and system credentials were not changed.")
+    return True
+
+
 def _remove_repaired_credential(
     email: str, store: CredentialStoreProtocol, output_fn: Callable[[str], None]
 ) -> None:
@@ -406,6 +443,23 @@ def _copy_public_directory(source: Path, destination: Path) -> None:
         if candidate.is_symlink():
             raise OSError(f"symbolic links are not supported in the public package: {candidate.name}")
     shutil.copytree(source, destination, ignore=_ignore_nonruntime_files, copy_function=shutil.copy2)
+
+
+def _update_public_directory(source: Path, destination: Path) -> None:
+    """Refresh a reviewed public runtime directory without deleting local data."""
+    for candidate in source.rglob("*"):
+        relative_parts = candidate.relative_to(source).parts
+        if any(part in _EXCLUDED_RUNTIME_NAMES or part.startswith(".env") for part in relative_parts):
+            continue
+        if candidate.is_symlink():
+            raise OSError(f"symbolic links are not supported in the public package: {candidate.name}")
+    shutil.copytree(
+        source,
+        destination,
+        dirs_exist_ok=True,
+        ignore=_ignore_nonruntime_files,
+        copy_function=shutil.copy2,
+    )
 
 
 def _ignore_nonruntime_files(directory: str, entries: list[str]) -> set[str]:
@@ -564,6 +618,7 @@ def _build_argument_parser() -> _SafeArgumentParser:
     parser.add_argument("--reply-tone", dest="reply_tone")
     parser.add_argument("--secure-window", action="store_true")
     parser.add_argument("--repair-credential", action="store_true")
+    parser.add_argument("--upgrade-workspace", action="store_true")
     parser.add_argument("--workspace")
     parser.add_argument("--daily-brief", choices=("on", "off"))
     return parser
@@ -589,10 +644,25 @@ def _profile_prefill_from_parsed(parsed: argparse.Namespace) -> dict[str, str]:
 
 def _install_request_from_parsed(
     parsed: argparse.Namespace,
-) -> InstallRequest | CredentialRepairRequest | None:
+) -> InstallRequest | CredentialRepairRequest | WorkspaceUpgradeRequest | None:
+    profile_prefill = _profile_prefill_from_parsed(parsed)
+    if parsed.upgrade_workspace:
+        if (
+            parsed.secure_window
+            or parsed.repair_credential
+            or not isinstance(parsed.workspace, str)
+            or not parsed.workspace.strip()
+            or parsed.daily_brief is not None
+            or profile_prefill
+        ):
+            _build_argument_parser().error(
+                "Workspace upgrade requires only an existing workspace."
+            )
+        return WorkspaceUpgradeRequest(
+            workspace=Path(parsed.workspace.strip()).expanduser().resolve(strict=False)
+        )
     if not parsed.secure_window:
         return None
-    profile_prefill = _profile_prefill_from_parsed(parsed)
     if parsed.repair_credential:
         if (
             not isinstance(parsed.workspace, str)
@@ -624,7 +694,7 @@ def _install_request_from_parsed(
 
 def parse_install_request(
     argv: Sequence[str] | None = None,
-) -> InstallRequest | CredentialRepairRequest | None:
+) -> InstallRequest | CredentialRepairRequest | WorkspaceUpgradeRequest | None:
     """Parse a complete non-secret request for the dedicated Windows input window."""
     return _install_request_from_parsed(_build_argument_parser().parse_args(argv))
 
@@ -644,7 +714,12 @@ def main(
     if parsed.preflight:
         return 0
     request = _install_request_from_parsed(parsed)
-    if isinstance(request, CredentialRepairRequest):
+    if isinstance(request, WorkspaceUpgradeRequest):
+        result = run_workspace_upgrade(
+            Path(__file__).resolve().parents[1], request.workspace, output_fn=output_fn
+        )
+        return 0 if result else 1
+    elif isinstance(request, CredentialRepairRequest):
         result = run_credential_repair(
             Path(__file__).resolve().parents[1], request.workspace, output_fn=output_fn
         )

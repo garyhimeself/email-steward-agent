@@ -85,6 +85,13 @@ class DocumentationTests(unittest.TestCase):
         self.assertIn("business-email-managerment", (ROOT / "UPGRADE.md").read_text(encoding="utf-8"))
         self.assertIn("business-email-managerment", (ROOT / "UPGRADE.zh-CN.md").read_text(encoding="utf-8"))
 
+    def test_upgrade_guides_explain_the_existing_workspace_runtime_upgrade(self):
+        for path in (ROOT / "UPGRADE.md", ROOT / "UPGRADE.zh-CN.md"):
+            content = path.read_text(encoding="utf-8")
+            for required in ("--upgrade-workspace", "credential-status", "--repair-credential"):
+                with self.subTest(path=path, required=required):
+                    self.assertIn(required, content)
+
 
 if __name__ == "__main__":
     unittest.main()

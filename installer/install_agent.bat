@@ -20,6 +20,11 @@ if /I "%~1"=="--preflight" (
   exit /b %errorlevel%
 )
 
+if /I "%~1"=="--upgrade-workspace" (
+  py -3 "%~dp0install_agent.py" %*
+  exit /b %errorlevel%
+)
+
 if /I "%~1"=="--secure-window" (
   start "Email Steward - Secure Setup" /wait powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0secure_install_window.ps1" %*
   exit /b %errorlevel%

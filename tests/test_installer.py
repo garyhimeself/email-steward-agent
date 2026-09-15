@@ -239,6 +239,67 @@ class InstallerTests(unittest.TestCase):
 
         self.assertEqual(request.workspace, Path("C:/eileen-mail").resolve(strict=False))
 
+    def test_workspace_upgrade_adds_v7_runtime_without_replacing_local_config_or_user_files(self):
+        from installer.install_agent import run_workspace_upgrade
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "eileen-mail"
+            paths = WorkspacePaths.from_root(workspace)
+            paths.ensure_local_directories()
+            original_config = json.dumps(
+                {
+                    "name": "Eileen",
+                    "email": "eileen@example.com",
+                    "preferred_language": "Chinese",
+                    "reply_language": "English",
+                    "reply_tone": "professional and friendly",
+                }
+            )
+            paths.config_file.write_text(original_config, encoding="utf-8")
+            notes = workspace / "operator-notes.txt"
+            notes.write_text("keep", encoding="utf-8")
+
+            upgraded = run_workspace_upgrade(PROJECT_ROOT, workspace, output_fn=lambda message: None)
+
+            self.assertTrue(upgraded)
+            self.assertTrue((workspace / "installer" / "mail_runtime.py").is_file())
+            self.assertTrue((workspace / "src" / "email_steward" / "workspace_session.py").is_file())
+            self.assertEqual(paths.config_file.read_text(encoding="utf-8"), original_config)
+            self.assertEqual(notes.read_text(encoding="utf-8"), "keep")
+
+    def test_workspace_upgrade_request_requires_only_an_existing_workspace(self):
+        from installer import install_agent
+
+        request = install_agent.parse_install_request(
+            ["--upgrade-workspace", "--workspace", "C:/eileen-mail"]
+        )
+
+        self.assertEqual(request.workspace, Path("C:/eileen-mail").resolve(strict=False))
+
+    def test_workspace_upgrade_main_returns_failure_when_the_workspace_does_not_exist(self):
+        from installer import install_agent
+        from email_steward.preflight import LocalNetworkPreflight
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            exit_code = install_agent.main(
+                [
+                    "--upgrade-workspace",
+                    "--workspace",
+                    str(Path(temporary_directory) / "missing-workspace"),
+                ],
+                preflight_runner=lambda: LocalNetworkPreflight(
+                    hostname="test-computer",
+                    imap_host="imap.qiye.aliyun.com",
+                    imap_port=993,
+                    dns_addresses=(),
+                    tls_connected=True,
+                    public_ip="unknown",
+                ),
+                output_fn=lambda message: None,
+            )
+
+        self.assertEqual(exit_code, 1)
+
     def test_missing_prefill_field_falls_back_only_for_that_nonsecret_field(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory) / "marketing-mail"
@@ -524,6 +585,12 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("$PSScriptRoot", window_script)
         self.assertIn("Read-Host", window_script)
         self.assertNotIn("password", window_script.lower())
+
+    def test_windows_launcher_allows_a_noninteractive_existing_workspace_upgrade(self):
+        launcher = (PROJECT_ROOT / "installer" / "install_agent.bat").read_text(encoding="utf-8")
+
+        self.assertIn("--upgrade-workspace", launcher)
+        self.assertIn('py -3 "%~dp0install_agent.py" %*', launcher)
 
     def test_windows_secure_window_script_has_valid_powershell_syntax(self):
         script = PROJECT_ROOT / "installer" / "secure_install_window.ps1"
