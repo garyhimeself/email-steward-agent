@@ -437,6 +437,25 @@ class InstallerTests(unittest.TestCase):
         self.assertIn("Read-Host", window_script)
         self.assertNotIn("password", window_script.lower())
 
+    def test_windows_secure_window_script_has_valid_powershell_syntax(self):
+        script = PROJECT_ROOT / "installer" / "secure_install_window.ps1"
+        self.assertTrue(script.read_bytes().isascii())
+        escaped_script = str(script).replace("'", "''")
+        parser_command = (
+            "$tokens = $null; $errors = $null; "
+            "[System.Management.Automation.Language.Parser]::ParseFile("
+            f"'{escaped_script}', [ref]$tokens, [ref]$errors) | Out-Null; "
+            "if ($errors.Count -gt 0) { $errors | ForEach-Object Message; exit 1 }"
+        )
+        completed = subprocess.run(
+            ("powershell.exe", "-NoProfile", "-Command", parser_command),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
     def test_launchers_explain_when_python_311_is_not_available(self):
         windows_launcher = (PROJECT_ROOT / "installer" / "install_agent.bat").read_text(encoding="utf-8")
         macos_launcher = (PROJECT_ROOT / "installer" / "install_agent.command").read_text(encoding="utf-8")
