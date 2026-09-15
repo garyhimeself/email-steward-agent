@@ -29,6 +29,7 @@ from email_steward.credentials import (
 from email_steward.paths import WorkspacePaths
 from email_steward.preflight import format_preflight_messages, run_local_network_preflight
 from email_steward.profile import OperatorProfile, save_profile
+from email_steward.workspace_session import WorkspaceSessionError, load_workspace_profile
 
 
 ALIBABA_THIRD_PARTY_PASSWORD_PATH = (
@@ -110,6 +111,13 @@ class InstallRequest:
     workspace: Path
     daily_brief_enabled: bool
     profile_prefill: Mapping[str, str]
+
+
+@dataclass(frozen=True)
+class CredentialRepairRequest:
+    """A secure request that restores only a credential for an existing workspace."""
+
+    workspace: Path
 
 
 def run_install(
@@ -213,6 +221,68 @@ def run_install(
         daily_brief_enabled=daily_brief_enabled,
         next_step=(LUNA_ACCEPTANCE_PROMPT, TERRA_ACCEPTANCE_PROMPT),
     )
+
+
+def run_credential_repair(
+    root: Path,
+    workspace: str | Path,
+    *,
+    secret_prompt: Callable[[str], str] = getpass.getpass,
+    credential_store: CredentialStoreProtocol | None = None,
+    credential_store_factory: CredentialStoreFactory = CredentialStore,
+    dependency_runner: DependencyRunner | None = None,
+    imap_factory: Callable[[OperatorProfile, str], VerificationImapClient] | None = None,
+    output_fn: Callable[[str], None] = print,
+) -> OperatorProfile | None:
+    """Restore only a missing OS credential for an existing workspace."""
+    workspace_path = Path(workspace).expanduser().resolve(strict=False)
+    try:
+        profile = load_workspace_profile(workspace_path)
+    except WorkspaceSessionError:
+        output_fn("Credential repair stopped: the existing workspace mailbox configuration is unavailable.")
+        return None
+    output_fn(f"Target workspace: {workspace_path}")
+    output_fn(f"Mailbox to verify: {profile.email}")
+    output_fn(ALIBABA_THIRD_PARTY_PASSWORD_PATH)
+    output_fn("Generate the password, copy it now, and keep it safe: it is shown only once.")
+
+    store = _preflight_credentials(
+        Path(root),
+        credential_store=credential_store,
+        credential_store_factory=credential_store_factory,
+        dependency_runner=dependency_runner or _run_declared_dependency_install,
+        output_fn=output_fn,
+    )
+    if store is None:
+        return None
+    secret = secret_prompt("Alibaba third-party client password: ")
+    if not isinstance(secret, str) or not secret.strip():
+        output_fn("Credential repair stopped: a third-party client password is required.")
+        return None
+    try:
+        store.set(profile.email, secret)
+        _create_and_verify_readonly((imap_factory or _default_imap_factory), profile, secret)
+    except ImapVerificationError as error:
+        _report_imap_verification_failure(error, output_fn)
+        _remove_repaired_credential(profile.email, store, output_fn)
+        return None
+    except RuntimeError:
+        output_fn("Credential repair stopped: the secure operating-system credential store could not save the password.")
+        return None
+    output_fn("Credential repair succeeded. The existing workspace was not changed.")
+    return profile
+
+
+def _remove_repaired_credential(
+    email: str, store: CredentialStoreProtocol, output_fn: Callable[[str], None]
+) -> None:
+    """Remove only an unsuccessful repair credential, never workspace files."""
+    try:
+        store.delete(email)
+    except RuntimeError:
+        output_fn("Credential repair failed and the new system credential could not be removed; check Windows Credential Manager or macOS Keychain.")
+        return
+    output_fn("Credential repair failed. The supplied system credential was removed; the existing workspace was not changed.")
 
 
 def _preflight_credentials(
@@ -493,6 +563,7 @@ def _build_argument_parser() -> _SafeArgumentParser:
     parser.add_argument("--reply-language", dest="reply_language")
     parser.add_argument("--reply-tone", dest="reply_tone")
     parser.add_argument("--secure-window", action="store_true")
+    parser.add_argument("--repair-credential", action="store_true")
     parser.add_argument("--workspace")
     parser.add_argument("--daily-brief", choices=("on", "off"))
     return parser
@@ -516,10 +587,25 @@ def _profile_prefill_from_parsed(parsed: argparse.Namespace) -> dict[str, str]:
     }
 
 
-def _install_request_from_parsed(parsed: argparse.Namespace) -> InstallRequest | None:
+def _install_request_from_parsed(
+    parsed: argparse.Namespace,
+) -> InstallRequest | CredentialRepairRequest | None:
     if not parsed.secure_window:
         return None
     profile_prefill = _profile_prefill_from_parsed(parsed)
+    if parsed.repair_credential:
+        if (
+            not isinstance(parsed.workspace, str)
+            or not parsed.workspace.strip()
+            or parsed.daily_brief is not None
+            or profile_prefill
+        ):
+            _build_argument_parser().error(
+                "Secure credential repair requires only an existing workspace."
+            )
+        return CredentialRepairRequest(
+            workspace=Path(parsed.workspace.strip()).expanduser().resolve(strict=False)
+        )
     if (
         not isinstance(parsed.workspace, str)
         or not parsed.workspace.strip()
@@ -536,7 +622,9 @@ def _install_request_from_parsed(parsed: argparse.Namespace) -> InstallRequest |
     )
 
 
-def parse_install_request(argv: Sequence[str] | None = None) -> InstallRequest | None:
+def parse_install_request(
+    argv: Sequence[str] | None = None,
+) -> InstallRequest | CredentialRepairRequest | None:
     """Parse a complete non-secret request for the dedicated Windows input window."""
     return _install_request_from_parsed(_build_argument_parser().parse_args(argv))
 
@@ -556,12 +644,17 @@ def main(
     if parsed.preflight:
         return 0
     request = _install_request_from_parsed(parsed)
-    result = install_fn(
-        Path(__file__).resolve().parents[1],
-        profile_prefill=None if request is not None else _profile_prefill_from_parsed(parsed),
-        request=request,
-        output_fn=output_fn,
-    )
+    if isinstance(request, CredentialRepairRequest):
+        result = run_credential_repair(
+            Path(__file__).resolve().parents[1], request.workspace, output_fn=output_fn
+        )
+    else:
+        result = install_fn(
+            Path(__file__).resolve().parents[1],
+            profile_prefill=None if request is not None else _profile_prefill_from_parsed(parsed),
+            request=request,
+            output_fn=output_fn,
+        )
     return 0 if result is not None else 1
 
 

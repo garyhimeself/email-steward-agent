@@ -21,6 +21,12 @@ Tell the operator to create an Alibaba third-party client password in webmail:
 `Settings → Account & Security → Account Security → Third-party client login security management → Generate new password`.
 It is shown only once: copy and store it safely. Request it only through the local hidden prompt. Never request, repeat, log, save, commit, or paste it into chat.
 
+## Existing workspace runtime
+
+Before any IMAP read, SMTP send, star, or daily brief in a newly opened project chat, run `python installer/mail_runtime.py credential-status --workspace .` from this workspace. If it reports `credential_ready`, use `load_workspace_session` as the only credential source for local mailbox work; it retrieves the existing OS-managed credential only in process memory. Never ask for a third-party client password in chat or in Codex's integrated terminal.
+
+If it reports `credential_missing`, explain that the current Windows or macOS user cannot access the setup credential. Start the dedicated secure window with `installer/install_agent.bat --secure-window --repair-credential --workspace "."` on Windows. This repairs only the system credential and preserves the existing workspace. Do not rerun ordinary installation against a non-empty workspace.
+
 ## First installation conversation
 
 When an operator says “help me install this Agent,” collect and confirm in chat: workspace folder, daily-brief choice, name, personal company email, preferred language, reply language, and reply tone. On Windows, start only `installer/install_agent.bat` with `--secure-window` first, followed by `--workspace`, `--daily-brief`, `--name`, `--email`, `--preferred-language`, `--reply-language`, and `--reply-tone`. This opens a separate PowerShell window; do not invoke `install_agent.py` directly or start ordinary interactive setup in Codex’s integrated terminal. Do not make the operator repeat non-secret values in the window. The separate window must request only the third-party client password through `getpass`. Never put that password in a command, environment variable, file, or chat. If the secure window cannot open, stop instead of falling back to a terminal password prompt. If IMAP rejects login, say that the rejection does not prove the password is wrong; distinguish connection, TLS, timeout, authentication rejection, and a post-login mailbox failure without exposing raw server responses.

@@ -56,6 +56,22 @@ class DocumentationTests(unittest.TestCase):
                 with self.subTest(path=path, required=required):
                     self.assertIn(required, content)
 
+    def test_project_mail_skills_reuse_workspace_credentials_without_chat_prompts(self):
+        for path in (
+            ROOT / "AGENTS.md",
+            ROOT / ".agents" / "skills" / "business-email-management" / "SKILL.md",
+            ROOT / ".agents" / "skills" / "mail-imap-read" / "SKILL.md",
+        ):
+            content = path.read_text(encoding="utf-8")
+            for required in (
+                "credential-status",
+                "load_workspace_session",
+                "Never ask for a third-party client password in chat",
+                "--repair-credential",
+            ):
+                with self.subTest(path=path, required=required):
+                    self.assertIn(required, content)
+
     def test_humanizer_skill_explicitly_preserves_business_facts_and_recipients(self):
         content = (ROOT / ".agents" / "skills" / "humanizer" / "SKILL.md").read_text(encoding="utf-8").lower()
         for protected_value in ("facts", "money", "dates", "commitments", "recipients", "language"):

@@ -78,7 +78,9 @@ class ReleasePackageTests(unittest.TestCase):
             self.assertEqual(verified_members, tuple(sorted(verified_members)))
             for required in (
                 "src/email_steward/imap_read.py",
+                "src/email_steward/workspace_session.py",
                 "installer/install_agent.py",
+                "installer/mail_runtime.py",
                 "installer/install_agent.bat",
                 "installer/install_agent.command",
                 "installer/secure_install_window.ps1",
@@ -99,6 +101,8 @@ class ReleasePackageTests(unittest.TestCase):
                 "src/email_steward/preflight.py",
                 ".agents/skills/business-email-managerment/SKILL.md",
                 "tests/test_preflight.py",
+                "tests/test_mail_runtime.py",
+                "tests/test_workspace_session.py",
             ):
                 self.assertIn(required, verified_members)
 
@@ -161,7 +165,8 @@ class ReleasePackageTests(unittest.TestCase):
                 "import sys; "
                 "sys.path.insert(0, 'src'); "
                 "import installer.install_agent; "
-                "import email_steward.credentials, email_steward.imap_read, email_steward.smtp_send"
+                "import email_steward.credentials, email_steward.imap_read, email_steward.smtp_send, "
+                "email_steward.workspace_session, installer.mail_runtime"
             )
             completed = subprocess.run(
                 (sys.executable, "-c", program),

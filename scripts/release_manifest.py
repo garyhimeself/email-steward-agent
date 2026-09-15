@@ -24,6 +24,7 @@ RELEASE_MEMBERS = frozenset(
         "installer/install_agent.bat",
         "installer/install_agent.command",
         "installer/install_agent.py",
+        "installer/mail_runtime.py",
         "installer/secure_install_window.ps1",
         "src/email_steward/__init__.py",
         "src/email_steward/approval.py",
@@ -37,6 +38,7 @@ RELEASE_MEMBERS = frozenset(
         "src/email_steward/preflight.py",
         "src/email_steward/profile.py",
         "src/email_steward/smtp_send.py",
+        "src/email_steward/workspace_session.py",
         ".agents/skills/business-email-management/SKILL.md",
         ".agents/skills/business-email-managerment/SKILL.md",
         ".agents/skills/humanizer/SKILL.md",
@@ -54,11 +56,13 @@ RELEASE_MEMBERS = frozenset(
         "tests/test_imap_flag.py",
         "tests/test_imap_read.py",
         "tests/test_installer.py",
+        "tests/test_mail_runtime.py",
         "tests/test_paths.py",
         "tests/test_preflight.py",
         "tests/test_profile.py",
         "tests/test_release.py",
         "tests/test_smtp_send.py",
+        "tests/test_workspace_session.py",
     }
 )
 

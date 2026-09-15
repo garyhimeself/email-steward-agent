@@ -22,6 +22,7 @@ from installer.install_agent import (
     run_install,
 )
 from email_steward.credentials import CredentialStoreUnavailableError
+from email_steward.paths import WorkspacePaths
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -189,6 +190,54 @@ class InstallerTests(unittest.TestCase):
             self.assertIn(secret_event, events)
             self.assertLess(events.index(mailbox_event), events.index(secret_event))
             self.assertLess(events.index(workspace_event), events.index(secret_event))
+
+    def test_credential_repair_keeps_an_existing_workspace_and_restores_only_the_system_credential(self):
+        from installer.install_agent import run_credential_repair
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "eileen-mail"
+            paths = WorkspacePaths.from_root(workspace)
+            paths.ensure_local_directories()
+            paths.config_file.write_text(
+                json.dumps(
+                    {
+                        "name": "Eileen",
+                        "email": "eileen@example.com",
+                        "preferred_language": "Chinese",
+                        "reply_language": "English",
+                        "reply_tone": "professional and friendly",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            marker = workspace / "operator-notes.txt"
+            marker.write_text("keep", encoding="utf-8")
+            store = MemoryCredentialStore()
+            secret_prompts = []
+
+            profile = run_credential_repair(
+                PROJECT_ROOT,
+                workspace,
+                secret_prompt=lambda prompt: secret_prompts.append(prompt) or "test-only-secret",
+                credential_store=store,
+                imap_factory=lambda profile, secret: FakeImapClient(),
+                output_fn=lambda message: None,
+            )
+
+            self.assertIsNotNone(profile)
+            self.assertEqual(profile.email, "eileen@example.com")
+            self.assertEqual(secret_prompts, ["Alibaba third-party client password: "])
+            self.assertEqual(store.get("eileen@example.com"), "test-only-secret")
+            self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+
+    def test_secure_credential_repair_requires_only_the_existing_workspace(self):
+        from installer import install_agent
+
+        request = install_agent.parse_install_request(
+            ["--secure-window", "--repair-credential", "--workspace", "C:/eileen-mail"]
+        )
+
+        self.assertEqual(request.workspace, Path("C:/eileen-mail").resolve(strict=False))
 
     def test_missing_prefill_field_falls_back_only_for_that_nonsecret_field(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
