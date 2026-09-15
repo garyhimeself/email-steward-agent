@@ -46,6 +46,16 @@ class DocumentationTests(unittest.TestCase):
                 with self.subTest(path=path, required=required):
                     self.assertIn(required, content)
 
+    def test_installation_instructions_require_the_windows_secure_window_path(self):
+        for path in (
+            ROOT / "AGENTS.md",
+            ROOT / ".agents" / "skills" / "business-email-management" / "SKILL.md",
+        ):
+            content = path.read_text(encoding="utf-8")
+            for required in ("--secure-window", "--workspace", "--daily-brief"):
+                with self.subTest(path=path, required=required):
+                    self.assertIn(required, content)
+
     def test_humanizer_skill_explicitly_preserves_business_facts_and_recipients(self):
         content = (ROOT / ".agents" / "skills" / "humanizer" / "SKILL.md").read_text(encoding="utf-8").lower()
         for protected_value in ("facts", "money", "dates", "commitments", "recipients", "language"):
