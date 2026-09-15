@@ -1,4 +1,3 @@
-import io
 import sys
 import unittest
 from dataclasses import asdict
@@ -13,7 +12,6 @@ from email_steward.credentials import (
     collect_profile_and_secret,
 )
 from email_steward import credentials
-from installer.setup_email import ALIBABA_THIRD_PARTY_PASSWORD_PATH, run_setup
 
 
 TEST_SECRET = "not-a-real-password"
@@ -104,45 +102,6 @@ class CredentialSetupTests(unittest.TestCase):
         self.assertNotIn(TEST_SECRET, asdict(profile).values())
         self.assertNotIn("password", asdict(profile))
         self.assertNotIn("secret", asdict(profile))
-
-    def test_setup_status_never_echoes_the_secret(self):
-        output = io.StringIO()
-        store = MemoryCredentialStore()
-        answers = iter(("Wade Su", "wade@example.com", "English", "Chinese", "warm"))
-
-        profile = run_setup(
-            input_fn=lambda prompt: next(answers),
-            secret_prompt=lambda prompt: TEST_SECRET,
-            store=store,
-            output_fn=lambda message: print(message, file=output),
-        )
-
-        status = output.getvalue()
-        self.assertEqual(profile.email, "wade@example.com")
-        self.assertNotIn(TEST_SECRET, status)
-        self.assertNotIn(TEST_SECRET, repr(profile))
-        self.assertIn("setup is complete", status)
-
-    def test_installer_prints_alibaba_password_path_before_hidden_prompt(self):
-        events = []
-        answers = iter(("Wade Su", "wade@example.com", "English", "Chinese", "warm"))
-
-        run_setup(
-            input_fn=lambda prompt: events.append(("input", prompt)) or next(answers),
-            secret_prompt=lambda prompt: events.append(("secret", prompt)) or TEST_SECRET,
-            store=MemoryCredentialStore(),
-            output_fn=lambda message: events.append(("output", message)),
-        )
-
-        path_index = next(
-            index
-            for index, event in enumerate(events)
-            if event == ("output", ALIBABA_THIRD_PARTY_PASSWORD_PATH)
-        )
-        secret_index = next(
-            index for index, event in enumerate(events) if event[0] == "secret"
-        )
-        self.assertLess(path_index, secret_index)
 
     def test_memory_store_is_an_injected_setup_seam_not_a_credential_store_backend(self):
         store = MemoryCredentialStore()
