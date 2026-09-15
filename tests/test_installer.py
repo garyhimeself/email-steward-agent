@@ -151,6 +151,45 @@ class InstallerTests(unittest.TestCase):
             self.assertFalse(result.daily_brief_enabled)
             self.assertEqual(secret_prompts, ["Alibaba third-party client password: "])
 
+    def test_secure_window_displays_the_mailbox_and_workspace_before_password_entry(self):
+        from installer import install_agent
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory) / "eileen-mail"
+            request = install_agent.parse_install_request(
+                [
+                    "--secure-window",
+                    "--workspace", str(workspace),
+                    "--daily-brief", "off",
+                    "--name", "Eileen",
+                    "--email", "eileen@example.com",
+                    "--preferred-language", "Chinese",
+                    "--reply-language", "English",
+                    "--reply-tone", "professional and friendly",
+                ]
+            )
+            events = []
+
+            result = run_install(
+                PROJECT_ROOT,
+                input_fn=lambda prompt: self.fail(f"unexpected terminal prompt: {prompt}"),
+                secret_prompt=lambda prompt: events.append(("secret", prompt)) or "test-only-secret",
+                credential_store=MemoryCredentialStore(),
+                imap_factory=lambda profile, secret: FakeImapClient(),
+                output_fn=lambda message: events.append(("output", message)),
+                request=request,
+            )
+
+            self.assertIsNotNone(result)
+            mailbox_event = ("output", "Mailbox to verify: eileen@example.com")
+            workspace_event = ("output", f"Target workspace: {workspace}")
+            secret_event = ("secret", "Alibaba third-party client password: ")
+            self.assertIn(mailbox_event, events)
+            self.assertIn(workspace_event, events)
+            self.assertIn(secret_event, events)
+            self.assertLess(events.index(mailbox_event), events.index(secret_event))
+            self.assertLess(events.index(workspace_event), events.index(secret_event))
+
     def test_missing_prefill_field_falls_back_only_for_that_nonsecret_field(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory) / "marketing-mail"
@@ -455,6 +494,15 @@ class InstallerTests(unittest.TestCase):
         )
 
         self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+
+    def test_windows_secure_window_identifies_its_release_and_does_not_misreport_password_entry(self):
+        window_script = (PROJECT_ROOT / "installer" / "secure_install_window.ps1").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("Email Steward secure setup v6", window_script)
+        self.assertIn("reported an installation failure", window_script)
+        self.assertNotIn("No credential was requested", window_script)
 
     def test_launchers_explain_when_python_311_is_not_available(self):
         windows_launcher = (PROJECT_ROOT / "installer" / "install_agent.bat").read_text(encoding="utf-8")

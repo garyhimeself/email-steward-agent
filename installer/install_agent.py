@@ -138,6 +138,7 @@ def run_install(
         workspace = request.workspace
         output_fn(f"Target workspace: {workspace}")
         effective_profile_prefill = request.profile_prefill
+        output_fn(f"Mailbox to verify: {effective_profile_prefill['email']}")
 
     store = _preflight_credentials(
         Path(root),
